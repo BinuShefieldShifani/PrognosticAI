@@ -3,7 +3,7 @@
 **Multi-agent system for predictive maintenance of aerospace engines.**  
 Built on NASA C-MAPSS FD001 · XGBoost (GPU) · LangGraph · Local LLM (Ollama)
 
-> Directly applicable to GKN Aerospace PHM systems, Volvo CE equipment health management, and industrial predictive maintenance platforms.
+
 
 ---
 
