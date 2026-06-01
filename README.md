@@ -71,7 +71,7 @@ prognosticai/
 | RMSE (cycles) | **~13–16** | 13–16 | 10–13 | 6–8 |
 | NASA Score S | **< 400** | ~300–500 | ~200–300 | <100 |
 
-**RMSE interpretation:** RMSE=15 means predictions are off by ~15 flight cycles on average. GKN schedules maintenance windows of 50–200 cycles — so RMSE < 20 is operationally useful.
+**RMSE interpretation:** RMSE=15 means predictions are off by ~15 flight cycles on average. Industries schedules maintenance windows of 50–200 cycles — so RMSE < 20 is operationally useful.
 
 **NASA Score S** penalises late predictions (under-estimating RUL) more than early ones — a late maintenance call grounds an aircraft, early just costs money. Lower = better.
 
