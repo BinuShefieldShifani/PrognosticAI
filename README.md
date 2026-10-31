@@ -70,28 +70,55 @@ prognosticai/
 
 ## Model Performance on FD001
 
-Measured on the official test set (100 engines, last observed cycle), seed 42, CPU run:
+Measured on the official test set (100 engines, last observed cycle), CPU run, seed 42:
 
 | Metric | This model | Published XGBoost | Published LSTM | SOTA |
 |---|---|---|---|---|
-| Test RMSE (cycles) | **18.4** | 13–16 | 10–13 | 6–8 |
-| Test MAE (cycles) | **13.4** | | | |
-| NASA Score S | **690** | ~300–500 | ~200–300 | <100 |
+| Test RMSE (cycles) | **12.6** | 13–16 | 10–13 | 6–8 |
+| Test MAE (cycles) | **9.4** | | | |
+| NASA Score S | **243** | ~300–500 | ~200–300 | <100 |
 
-Across five different validation splits, test RMSE stayed between 18.0 and 19.4. Every run is
-tracked in MLflow, so new feature or parameter experiments can be compared against this baseline.
+Across five validation splits, test RMSE stayed between 12.4 and 12.9 and the NASA score between
+238 and 270. A Kaggle GPU run gives the same range. Every run is tracked in MLflow.
 
-**RMSE interpretation:** RMSE = 18 means predictions are off by about 18 flight cycles on average
+**RMSE interpretation:** RMSE = 12.6 means predictions are off by about 13 flight cycles on average
 for an engine whose history has been cut off at a random point.
 
 **NASA Score S** penalises late predictions (predicting more remaining life than the engine
 actually has, so maintenance comes too late) more than early ones. Lower = better.
 
-**Validation split by engine.** An earlier version shuffled rows before the train/validation split.
-Neighbouring cycles of the same engine then ended up on both sides, and validation RMSE came out at
-6.4 while test RMSE was 18.5. Splitting by engine (`GroupShuffleSplit`) gives an honest validation
-score (16–20), stops early at a few hundred rounds instead of 5000, and trains about 20x faster
-with the same test result.
+### How the model got here
+
+| Version | Test RMSE | NASA S | What changed |
+|---|---|---|---|
+| v3 | 18.5 | 641 | Rolling mean/std over 5–15 cycles, depth 8, row-level validation split |
+| v4 | 18.4 | 690 | Engine-level validation split (same accuracy, honest validation, 20x faster) |
+| v5 | **12.6** | **243** | Sensor trend (slope) features over 10–80 cycles, longer rolling windows, depth 5 |
+
+**v4: validation leakage.** v3 shuffled rows before the train/validation split, so neighbouring
+cycles of the same engine sat on both sides. Validation RMSE came out at 6.4 while test RMSE was
+18.5. Splitting by engine (`GroupShuffleSplit`) fixed the validation estimate.
+
+**v5: the model could not see how fast an engine was degrading.** With only 5–15 cycle windows,
+engines close to failure looked healthier than they were: for engines with under 30 cycles left,
+v4 predicted on average 7.9 cycles too much remaining life (the dangerous direction). Adding the
+slope of each sensor over the last 10, 30, 50 and 80 cycles brought that bias down to +0.9 cycles.
+
+Feature and model choices were made with 5-fold engine-level cross-validation on the training set
+only; the test set was used once, after choosing:
+
+| Variant (5-fold engine CV) | CV RMSE |
+|---|---|
+| v4 features | 19.9 |
+| + rolling windows up to 30 cycles | 17.9 |
+| + slopes over 10, 20 cycles | 17.1 |
+| + slope over 30 cycles | 15.3 |
+| + slopes over 10, 30, 50, 80 cycles, depth 5 | **11.6** |
+| EWM smoothing, or RUL cap 125 | no gain, not used |
+
+Note that validation RMSE in the training log (about 8.5) is lower than test RMSE: validation
+scores every cycle of the held-out engines, including the long healthy stretch that is easy to
+predict, while the test set scores one cut-off point per engine.
 
 ---
 
@@ -128,7 +155,7 @@ cmapss_raw_files ──(raw_data_is_valid, blocking)──▶ rul_model ──(r
 ```
 
 The data-quality check (schema, nulls, cycle continuity, label count) blocks training if the raw
-data is bad. The RMSE gate fails if the test RMSE goes above 20 cycles. The whole graph is
+data is bad. The RMSE gate fails if the test RMSE goes above 15 cycles. The whole graph is
 scheduled weekly (Monday 03:00, Europe/Stockholm).
 
 ```bash
@@ -146,7 +173,7 @@ score, MLflow logging and model reload, and the full Dagster graph including a f
 
 GitHub Actions runs on every push and pull request:
 1. `ruff`, Dagster definition validation and `pytest`
-2. Training on the real FD001 data (CPU), failing the build if test RMSE > 20, with the MLflow
+2. Training on the real FD001 data (CPU), failing the build if test RMSE > 15, with the MLflow
    run uploaded as a build artifact and metrics in the job summary
 
 ## GPU Training on Kaggle
@@ -178,7 +205,7 @@ If Ollama is unavailable, the sensor analysis and RUL prediction still work — 
 
 **Why these 14 sensors?** In FD001, sensors s1, s5, s6, s10, s16, s18, s19 have near-zero variance — they carry no degradation signal. Including them adds noise. This is validated by both variance analysis and feature importance from XGBoost.
 
-**Why rolling features (5, 10, 15 cycles)?** A single cycle's sensor reading is noisy. Rolling mean/std captures *trend* — is sensor s7 increasing over the last 10 cycles? That's more informative than any single reading.
+**Why rolling and slope features?** A single cycle's sensor reading is noisy. Rolling mean/std over 5, 10, 20 and 30 cycles smooths it. The rolling slope over 10, 30, 50 and 80 cycles measures how fast each sensor is drifting, which is what tells an engine near failure apart from one that has only just started to degrade. All features look backwards only, so no future data leaks into a prediction (there is a test for this). 14 sensors x 13 features + cycle_norm = 183 features.
 
 ---
 

@@ -39,7 +39,11 @@ INFORMATIVE_SENSORS = [
 MAX_RUL = 130
 
 # ── Feature Engineering ───────────────────────────────────────────────────
-ROLLING_WINDOWS = [5, 10, 15]       # cycles — captures short, medium, long trends
+ROLLING_WINDOWS = [5, 10, 20, 30]   # cycles — rolling mean/std: short to long smoothing
+# Rolling linear-regression slope of each sensor over these windows (cycles).
+# Long windows measure how fast a sensor is drifting, which is what separates an
+# engine that is just starting to degrade from one that is close to failure.
+SLOPE_WINDOWS = [10, 30, 50, 80]
 SEQUENCE_LENGTH = 30                # look-back window for feature computation
 
 # ── Model ─────────────────────────────────────────────────────────────────
@@ -65,7 +69,7 @@ MLFLOW_ARTIFACT_LOCATION = os.getenv("MLFLOW_ARTIFACT_LOCATION")  # None = MLflo
 MLFLOW_REGISTERED_MODEL = "prognosticai-rul-xgb"
 
 # Quality gate used by CI and the Dagster asset check (test-set RMSE, cycles)
-RMSE_GATE = float(os.getenv("PROGNOSTIC_RMSE_GATE", "20.0"))
+RMSE_GATE = float(os.getenv("PROGNOSTIC_RMSE_GATE", "15.0"))
 
 # ── Alert Thresholds ──────────────────────────────────────────────────────
 THRESHOLD_CRITICAL = 30    # cycles — ground immediately
