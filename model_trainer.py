@@ -1,6 +1,10 @@
 """
-model_trainer.py — XGBoost RUL Predictor (v4)
+model_trainer.py — XGBoost RUL Predictor (v5)
 ==============================================
+Changes from v4:
+  - Trend features (rolling slopes over 10-80 cycles) and longer rolling
+    windows, plus shallower trees (depth 5). Chosen with 5-fold engine-level
+    cross-validation on the training set only; test RMSE went from ~18.4 to ~12.5
 Changes from v3:
   - Every training run is tracked in MLflow: parameters, metrics, the
     validation curve, feature importance, per-engine test predictions and
@@ -30,7 +34,7 @@ from config import (
     DATASET, LEARNING_RATE, MAX_RUL, MLFLOW_ARTIFACT_LOCATION,
     MLFLOW_EXPERIMENT, MLFLOW_REGISTERED_MODEL, MLFLOW_TRACKING_URI,
     MODEL_PATH, N_ESTIMATORS, RANDOM_SEED, RMSE_GATE, RMSE_TARGET,
-    ROLLING_WINDOWS, SCALER_PATH, VAL_FRACTION, XGB_DEVICE,
+    ROLLING_WINDOWS, SCALER_PATH, SLOPE_WINDOWS, VAL_FRACTION, XGB_DEVICE,
 )
 from data_processor import build_test_dataset, build_train_dataset, get_feature_columns
 
@@ -45,11 +49,11 @@ def resolve_device(device: str | None = None) -> str:
 def model_params(n_estimators: int, learning_rate: float, device: str) -> dict:
     return dict(
         n_estimators          = n_estimators,
-        max_depth             = 8,
+        max_depth             = 5,      # was 8; shallower trees generalise better (engine-level CV)
         learning_rate         = learning_rate,
         subsample             = 0.75,
         colsample_bytree      = 0.65,
-        min_child_weight      = 8,
+        min_child_weight      = 20,     # was 8
         gamma                 = 0.1,
         reg_alpha             = 0.2,
         reg_lambda            = 1.5,
@@ -108,7 +112,7 @@ def train(n_estimators: int | None = None,
     device = resolve_device(device)
 
     print("=" * 58)
-    print("  PrognosticAI — XGBoost RUL Training (v4)")
+    print("  PrognosticAI — XGBoost RUL Training (v5)")
     print(f"  Dataset: NASA C-MAPSS {DATASET}  |  device: {device}")
     print("=" * 58)
 
@@ -221,6 +225,7 @@ def _log_to_mlflow(model, params, metrics, importance, predictions, X_example,
         mlflow.log_params({
             "max_rul_cap": MAX_RUL,
             "rolling_windows": ",".join(map(str, ROLLING_WINDOWS)),
+            "slope_windows": ",".join(map(str, SLOPE_WINDOWS)),
             "n_features": n_features,
             "val_fraction": VAL_FRACTION,
             "n_val_engines": n_val_engines,

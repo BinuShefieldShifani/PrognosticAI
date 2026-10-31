@@ -6,7 +6,8 @@ What this does (plain English):
   2. Computes the true RUL label for every row in the training set
      RUL = (max cycle for that engine) - (current cycle), capped at 130
   3. Drops sensors that don't change in FD001 (they add noise, not signal)
-  4. Creates rolling features — mean and std over 5, 10, 15 cycle windows
+  4. Creates rolling features — mean and std over 5, 10, 20, 30 cycle windows,
+     plus the slope of each sensor over 10, 30, 50, 80 cycles (rate of degradation)
      This captures "is the engine getting worse?" not just "what is it right now?"
   5. Normalises all features to [0, 1] so XGBoost isn't biased by scale
 
@@ -25,7 +26,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 from config import (
     DATA_DIR, COL_NAMES, INFORMATIVE_SENSORS,
-    MAX_RUL, ROLLING_WINDOWS, SCALER_PATH
+    MAX_RUL, ROLLING_WINDOWS, SLOPE_WINDOWS, SCALER_PATH
 )
 
 
@@ -89,17 +90,28 @@ def add_rul_labels(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Feature Engineering ───────────────────────────────────────────────────
 
+def _rolling_slope(values: pd.Series, t: pd.Series, window: int) -> np.ndarray:
+    """
+    Least-squares slope of `values` against cycle number over the last `window`
+    cycles (backward-looking only, so no future information is used).
+    slope = cov(t, x) / var(t); early rows use whatever history exists.
+    """
+    cov = t.rolling(window, min_periods=2).cov(values)
+    var = t.rolling(window, min_periods=2).var()
+    return (cov / var).fillna(0.0).values
+
+
 def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame:
     """
     Build the feature matrix used for model training and inference.
 
-    Features created per engine:
+    Features created per engine (all backward-looking):
       - Raw sensor values (informative sensors only)
-      - Rolling mean  × 3 windows (5, 10, 15 cycles)
-      - Rolling std   × 3 windows (5, 10, 15 cycles)
-      = 14 base sensors × (1 + 2×3) = 14 × 7 = 98 features
+      - Rolling mean and std  x 4 windows (5, 10, 20, 30 cycles)
+      - Rolling slope         x 4 windows (10, 30, 50, 80 cycles)
+      = 14 sensors x (1 + 2x4 + 4) = 182 features
 
-    Plus: cycle_norm (normalized cycle position within engine life)
+    Plus: cycle_norm (cycle number scaled by a fixed constant)  → 183 total
     """
     dfs = []
     for unit_id, group in df.groupby("unit"):
@@ -111,14 +123,17 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
         # for every engine's last row, making the model think all engines are dying.
         g["cycle_norm"] = g["cycle"] / 400.0
 
+        t = g["cycle"].astype(float).reset_index(drop=True)
+        new_cols = {}
         for sensor in INFORMATIVE_SENSORS:
+            x = g[sensor]
             for w in ROLLING_WINDOWS:
-                g[f"{sensor}_mean{w}"] = (
-                    g[sensor].rolling(w, min_periods=1).mean()
-                )
-                g[f"{sensor}_std{w}"] = (
-                    g[sensor].rolling(w, min_periods=1).std().fillna(0)
-                )
+                new_cols[f"{sensor}_mean{w}"] = x.rolling(w, min_periods=1).mean().values
+                new_cols[f"{sensor}_std{w}"] = x.rolling(w, min_periods=1).std().fillna(0).values
+            x0 = x.reset_index(drop=True)
+            for w in SLOPE_WINDOWS:
+                new_cols[f"{sensor}_slope{w}"] = _rolling_slope(x0, t, w)
+        g = pd.concat([g, pd.DataFrame(new_cols, index=g.index)], axis=1)
         dfs.append(g)
 
     result = pd.concat(dfs, ignore_index=True)
@@ -132,6 +147,8 @@ def get_feature_columns() -> list[str]:
     for s in INFORMATIVE_SENSORS:
         for w in ROLLING_WINDOWS:
             rolling += [f"{s}_mean{w}", f"{s}_std{w}"]
+        for w in SLOPE_WINDOWS:
+            rolling += [f"{s}_slope{w}"]
     return base + rolling
 
 

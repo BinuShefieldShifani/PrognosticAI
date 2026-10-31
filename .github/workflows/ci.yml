@@ -70,7 +70,7 @@ jobs:
           python model_trainer.py \
             --run-name "ci-${GITHUB_SHA::7}" \
             --metrics-out metrics.json \
-            --fail-above-rmse 20
+            --fail-above-rmse 15
 
       - name: Show metrics
         if: always()
