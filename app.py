@@ -326,7 +326,7 @@ with tab2:
             st.metric("Predicted RUL", f"{last_pred:.1f} cycles")
         st.metric("Engine observed life", f"{int(cycles[-1])} cycles")
         margin = last_pred * 0.15
-        st.metric("Confidence interval", f"[{max(0,last_pred-margin):.1f} — {last_pred+margin:.1f}]")
+        st.metric("Expected range (±15%)", f"[{max(0,last_pred-margin):.1f} – {last_pred+margin:.1f}]")
 
     # Prediction trend over engine life
     st.markdown("---")
@@ -385,7 +385,7 @@ with tab3:
             "This calls the Ollama LLM for failure diagnosis and work order generation."
         )
         st.markdown("""
-**Agent pipeline (4 nodes):**
+**Agent pipeline (5 nodes up to 4 run per engine):**
 ```
 [sensor_analyst] → [rul_estimator] → conditional route →
     if degraded: [failure_diagnosis] → [workorder_generator]
