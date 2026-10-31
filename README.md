@@ -1,9 +1,9 @@
 # PrognosticAI — Turbofan Engine Remaining Useful Life Prediction
 
-**Multi-agent system for predictive maintenance of aerospace engines.**  
-Built on NASA C-MAPSS FD001 · XGBoost (GPU) · LangGraph · Local LLM (Ollama)
+[![CI](https://github.com/BinuShefieldShifani/PrognosticAI/actions/workflows/ci.yml/badge.svg)](https://github.com/BinuShefieldShifani/PrognosticAI/actions/workflows/ci.yml)
 
-> Directly applicable to GKN Aerospace PHM systems, Volvo CE equipment health management, and industrial predictive maintenance platforms.
+**Predictive maintenance pipeline for turbofan engines, from raw sensor data to maintenance work orders.**  
+Built on NASA C-MAPSS FD001 · XGBoost (GPU/CPU) · MLflow · Dagster · GitHub Actions · LangGraph · Local LLM (Ollama)
 
 ---
 
@@ -53,27 +53,45 @@ Or manually: https://data.nasa.gov/Aerospace/CMAPSS-Jet-Engine-Simulated-Data/ff
 
 ```
 prognosticai/
-├── config.py            ← all thresholds, model paths, sensor lists
-├── download_data.py     ← fetches NASA C-MAPSS FD001
-├── data_processor.py   ← loading, RUL labelling, feature engineering
-├── model_trainer.py    ← XGBoost training + evaluation
-├── knowledge_base.py   ← ATA chapter maintenance procedures (MRO-001 → MRO-006)
-├── agent_graph.py      ← LangGraph 4-node agent pipeline
-└── app.py              ← Streamlit dashboard
+├── config.py               ← thresholds, sensor lists, env-overridable paths and settings
+├── download_data.py        ← fetches NASA C-MAPSS FD001
+├── data_processor.py       ← loading, validation, RUL labelling, feature engineering
+├── model_trainer.py        ← XGBoost training + evaluation, MLflow tracking, CLI
+├── pipelines/definitions.py← Dagster assets, data-quality checks, weekly schedule
+├── knowledge_base.py       ← ATA chapter maintenance procedures (MRO-001 → MRO-006)
+├── agent_graph.py          ← LangGraph 4-node agent pipeline
+├── app.py                  ← Streamlit dashboard
+├── tests/                  ← pytest suite on synthetic C-MAPSS-format data
+├── notebooks/kaggle_train.ipynb ← GPU training run on Kaggle
+└── .github/workflows/ci.yml     ← lint, tests, real-data training + RMSE gate
 ```
 
 ---
 
 ## Model Performance on FD001
 
-| Metric | Our Result | XGBoost Baseline | LSTM Baseline | SOTA |
+Measured on the official test set (100 engines, last observed cycle), seed 42, CPU run:
+
+| Metric | This model | Published XGBoost | Published LSTM | SOTA |
 |---|---|---|---|---|
-| RMSE (cycles) | **~13–16** | 13–16 | 10–13 | 6–8 |
-| NASA Score S | **< 400** | ~300–500 | ~200–300 | <100 |
+| Test RMSE (cycles) | **18.4** | 13–16 | 10–13 | 6–8 |
+| Test MAE (cycles) | **13.4** | | | |
+| NASA Score S | **690** | ~300–500 | ~200–300 | <100 |
 
-**RMSE interpretation:** RMSE=15 means predictions are off by ~15 flight cycles on average. GKN schedules maintenance windows of 50–200 cycles — so RMSE < 20 is operationally useful.
+Across five different validation splits, test RMSE stayed between 18.0 and 19.4. Every run is
+tracked in MLflow, so new feature or parameter experiments can be compared against this baseline.
 
-**NASA Score S** penalises late predictions (under-estimating RUL) more than early ones — a late maintenance call grounds an aircraft, early just costs money. Lower = better.
+**RMSE interpretation:** RMSE = 18 means predictions are off by about 18 flight cycles on average
+for an engine whose history has been cut off at a random point.
+
+**NASA Score S** penalises late predictions (predicting more remaining life than the engine
+actually has, so maintenance comes too late) more than early ones. Lower = better.
+
+**Validation split by engine.** An earlier version shuffled rows before the train/validation split.
+Neighbouring cycles of the same engine then ended up on both sides, and validation RMSE came out at
+6.4 while test RMSE was 18.5. Splitting by engine (`GroupShuffleSplit`) gives an honest validation
+score (16–20), stops early at a few hundred rounds instead of 5000, and trains about 20x faster
+with the same test result.
 
 ---
 
@@ -86,12 +104,55 @@ pip install -r requirements.txt
 # 2. Download data (~2 MB)
 python download_data.py
 
-# 3. Train model (~30 sec on GPU, ~3 min on CPU)
-python model_trainer.py
+# 3. Train model (about 30 s on CPU; logs the run to MLflow)
+python model_trainer.py                # --device cpu|cuda|auto, --register, --no-mlflow
 
 # 4. Launch UI
 streamlit run app.py
 ```
+
+## Experiment Tracking (MLflow)
+
+Each training run logs its parameters, metrics (val/test RMSE, MAE, NASA score, best iteration,
+training time), the validation curve, feature importance, per-engine test predictions, the scaler
+and the model itself. `--register` adds the model to the registry as `prognosticai-rul-xgb`.
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db     # http://localhost:5000
+```
+
+## Pipeline Orchestration (Dagster)
+
+```
+cmapss_raw_files ──(raw_data_is_valid, blocking)──▶ rul_model ──(rmse_within_gate)
+```
+
+The data-quality check (schema, nulls, cycle continuity, label count) blocks training if the raw
+data is bad. The RMSE gate fails if the test RMSE goes above 20 cycles. The whole graph is
+scheduled weekly (Monday 03:00, Europe/Stockholm).
+
+```bash
+pip install -r requirements-dev.txt
+dagster dev                                           # http://localhost:3000
+# or one-off from the command line:
+dagster asset materialize -m pipelines.definitions --select '*'
+```
+
+## Testing and CI
+
+`pytest` runs the suite on small synthetic files in C-MAPSS format, so it is fast and offline.
+It covers RUL labelling, feature engineering, data validation, the engine-level split, the NASA
+score, MLflow logging and model reload, and the full Dagster graph including a failing gate.
+
+GitHub Actions runs on every push and pull request:
+1. `ruff`, Dagster definition validation and `pytest`
+2. Training on the real FD001 data (CPU), failing the build if test RMSE > 20, with the MLflow
+   run uploaded as a build artifact and metrics in the job summary
+
+## GPU Training on Kaggle
+
+`notebooks/kaggle_train.ipynb` clones the repo, runs the tests, then runs the Dagster pipeline on
+a Kaggle GPU and shows the MLflow runs. Set the accelerator to GPU and turn Internet on first.
 
 ### Ollama (LLM backend)
 
@@ -110,6 +171,8 @@ If Ollama is unavailable, the sensor analysis and RUL prediction still work — 
 ## Key Engineering Decisions
 
 **Why FD001?** Single operating condition means no need to cluster or normalise by operating point. The signal-to-noise ratio is highest, and published benchmarks are most consistent. Easier to validate.
+
+**Why Dagster over Airflow?** It installs with pip, runs locally with `dagster dev`, models the data and the model as assets with built-in quality checks, and the whole graph can be run inside pytest, which is what lets CI test the pipeline itself.
 
 **Why piecewise RUL (cap at 130)?** Engines don't degrade linearly from new. They run healthy for most of their life. Capping tells the model "don't bother learning the healthy regime — focus on the last 130 cycles." Published standard since Saxena et al. (2008).
 

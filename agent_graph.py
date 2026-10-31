@@ -29,7 +29,7 @@ Node responsibilities:
 import json
 import re
 import numpy as np
-from typing import TypedDict, Optional
+from typing import TypedDict
 
 import ollama
 from langgraph.graph import StateGraph, START, END
@@ -40,8 +40,8 @@ from config import (
     THRESHOLD_CRITICAL, THRESHOLD_HIGH, THRESHOLD_MEDIUM,
 )
 from model_trainer import load_model_and_scaler, predict_rul
-from data_processor import get_engine_data, scale_features, get_feature_columns
-from knowledge_base import retrieve_procedures, format_procedure_for_llm
+from data_processor import get_engine_data, scale_features
+from knowledge_base import retrieve_procedures
 
 
 # ── Agent State ───────────────────────────────────────────────────────────
@@ -193,15 +193,13 @@ def rul_estimator_node(state: AgentState) -> AgentState:
     model, scaler = load_model_and_scaler()
 
     engine_df = get_engine_data(engine_id, split=split)
-    feat_cols = get_feature_columns()
 
     # Use last observed cycle for prediction
-    last_features = engine_df[feat_cols].iloc[-1:].values
     X_scaled, _ = scale_features(engine_df, fit=False, scaler=scaler)
     last_scaled = X_scaled[-1:]
 
     rul, lower, upper = predict_rul(last_scaled, model)
-    log.append(f"[RUL Estimator] Predicted RUL: {rul:.1f} cycles  (95% CI: [{lower:.1f}, {upper:.1f}])")
+    log.append(f"[RUL Estimator] Predicted RUL: {rul:.1f} cycles  (heuristic ±15% band: [{lower:.1f}, {upper:.1f}])")
 
     # Assign priority
     if rul < THRESHOLD_CRITICAL:
@@ -446,10 +444,10 @@ def _fallback_work_order(state: AgentState, procedures: list) -> dict:
         "failure_mode": failure,
         "deadline_cycles": deadline,
         "actions": [
-            f"Perform borescope inspection of HPC stages 1–7 (ATA 72-30)",
-            f"Measure blade tip clearance at each stage — serviceable limit 0.45 mm",
-            f"Cut oil filter and inspect for metallic debris — submit SOAP sample (ATA 72-80)",
-            f"Review EGT margin trend data — flag if margin < 50°C above redline",
+            "Perform borescope inspection of HPC stages 1–7 (ATA 72-30)",
+            "Measure blade tip clearance at each stage — serviceable limit 0.45 mm",
+            "Cut oil filter and inspect for metallic debris — submit SOAP sample (ATA 72-80)",
+            "Review EGT margin trend data — flag if margin < 50°C above redline",
         ],
         "procedures_referenced": [p["id"] for p in procedures],
         "parts_to_preorder": all_parts[:6],

@@ -5,3 +5,11 @@ models/
 *.pyc
 .DS_Store
 data/
+mlflow.db
+mlruns/
+mlartifacts/
+metrics.json
+.dagster_home/
+tmp*/
+.pytest_cache/
+.ruff_cache/

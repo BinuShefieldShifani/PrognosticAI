@@ -14,7 +14,7 @@ Why piecewise RUL (cap at 130)?
   Real engines don't degrade linearly from birth. They run "healthy" for most
   of their life, then degrade. Capping at 130 tells the model: "anything above
   130 cycles to failure — just predict 130. We only care when failure is close."
-  This is the published standard (Saxena et al., 2008) and what GKN engineers expect.
+  This is the published standard (Saxena et al., 2008).
 """
 
 import os
@@ -43,6 +43,34 @@ def load_rul_ground_truth() -> np.ndarray:
     """Load the ground-truth RUL for the test set (100 values, one per engine)."""
     path = os.path.join(DATA_DIR, "RUL_FD001.txt")
     return pd.read_csv(path, header=None).values.flatten()
+
+
+# ── Data Validation ───────────────────────────────────────────────────────
+
+def validate_raw(df: pd.DataFrame) -> list[str]:
+    """
+    Basic quality checks on a raw C-MAPSS file. Returns a list of problems
+    (empty list = data is usable). Used by the Dagster asset check and tests.
+    """
+    problems = []
+    missing = [c for c in COL_NAMES if c not in df.columns]
+    if missing:
+        problems.append(f"missing columns: {missing}")
+        return problems
+    if df[COL_NAMES].isna().any().any():
+        bad = df[COL_NAMES].columns[df[COL_NAMES].isna().any()].tolist()
+        problems.append(f"null values in: {bad}")
+    if df.empty:
+        problems.append("file has no rows")
+        return problems
+    for unit, g in df.groupby("unit"):
+        cycles = g["cycle"].values
+        if cycles[0] != 1 or not (np.diff(cycles) == 1).all():
+            problems.append(f"engine {unit}: cycles are not a 1..N sequence")
+    non_numeric = [c for c in COL_NAMES if not pd.api.types.is_numeric_dtype(df[c])]
+    if non_numeric:
+        problems.append(f"non-numeric columns: {non_numeric}")
+    return problems
 
 
 # ── RUL Labelling ─────────────────────────────────────────────────────────
@@ -133,17 +161,18 @@ def scale_features(
 
 # ── Convenience: Build Train Dataset in One Call ──────────────────────────
 
-def build_train_dataset() -> tuple[np.ndarray, np.ndarray, MinMaxScaler]:
+def build_train_dataset(return_groups: bool = False):
     """
     Full pipeline for training:
       raw → RUL labels → features → scaled X, y
     Returns: X_train, y_train, fitted_scaler
+             (+ engine id per row when return_groups=True, for engine-level splits)
     """
     print("Loading train_FD001.txt ...")
     df = load_raw("train")
     print(f"  {len(df):,} rows, {df['unit'].nunique()} engines")
 
-    print("Adding piecewise RUL labels (cap={MAX_RUL}) ...")
+    print(f"Adding piecewise RUL labels (cap={MAX_RUL}) ...")
     df = add_rul_labels(df)
 
     print("Engineering features ...")
@@ -152,6 +181,8 @@ def build_train_dataset() -> tuple[np.ndarray, np.ndarray, MinMaxScaler]:
     X, scaler = scale_features(df, fit=True)
     y = df["rul"].values
     print(f"  Feature matrix: {X.shape}  |  RUL range: [{y.min():.0f}, {y.max():.0f}]")
+    if return_groups:
+        return X, y, scaler, df["unit"].values
     return X, y, scaler
 
 
