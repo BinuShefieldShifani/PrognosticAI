@@ -34,7 +34,7 @@ If the LLM is unavailable, sensor analysis and RUL prediction still work. Only t
 
 ## Screenshots
 
-| RUL prediction | Sensor trends |
+| RUL prediction (engine 54, held out from training) | Sensor trends |
 |---|---|
 | ![RUL prediction](docs/screenshot_rul.png) | ![Sensor trends](docs/screenshot_sensors.png) |
 
