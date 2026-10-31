@@ -1,9 +1,13 @@
 """
 PrognosticAI — Central Configuration
 =====================================
-Targets: GKN Aerospace / Volvo CE / Volvo Trucks
 Dataset: NASA C-MAPSS FD001 (turbofan engine degradation)
+
+Paths and runtime settings can be overridden with environment variables,
+so the same code runs locally, in CI (CPU) and on Kaggle (GPU).
 """
+
+import os
 
 # ── LLM (Ollama in Docker) ─────────────────────────────────────────────────
 OLLAMA_HOST = "http://localhost:11434"   # change if Docker is on a different host
@@ -11,8 +15,8 @@ OLLAMA_MODEL = "gptoss:20b"              # the model you have available
 
 # ── Dataset ────────────────────────────────────────────────────────────────
 # We use FD001 only: single operating condition, single fault mode (HPC Degradation)
-# This gives the cleanest signal and the benchmark most cited in GKN/aerospace research
-DATA_DIR = "data"
+# This gives the cleanest signal and the most cited benchmark in PHM research
+DATA_DIR = os.getenv("PROGNOSTIC_DATA_DIR", "data")
 DATASET = "FD001"
 
 # Columns exactly as NASA defines them (26 total, space-separated, no header)
@@ -39,8 +43,29 @@ ROLLING_WINDOWS = [5, 10, 15]       # cycles — captures short, medium, long tr
 SEQUENCE_LENGTH = 30                # look-back window for feature computation
 
 # ── Model ─────────────────────────────────────────────────────────────────
-MODEL_PATH = "models/xgboost_rul.pkl"
-SCALER_PATH = "models/scaler.pkl"
+MODEL_DIR = os.getenv("PROGNOSTIC_MODEL_DIR", "models")
+MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_rul.pkl")
+SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
+
+# "auto" picks cuda when an NVIDIA GPU is visible, otherwise cpu.
+XGB_DEVICE = os.getenv("PROGNOSTIC_DEVICE", "auto")
+N_ESTIMATORS = int(os.getenv("PROGNOSTIC_N_ESTIMATORS", "5000"))
+LEARNING_RATE = float(os.getenv("PROGNOSTIC_LEARNING_RATE", "0.015"))
+
+# Validation split is done by ENGINE, not by row. A row-level shuffle puts
+# neighbouring cycles of the same engine in both train and val, which makes
+# the validation score look better than it is and skews early stopping.
+VAL_FRACTION = 0.15
+RANDOM_SEED = 42
+
+# ── Experiment tracking (MLflow) ──────────────────────────────────────────
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+MLFLOW_EXPERIMENT = os.getenv("MLFLOW_EXPERIMENT_NAME", "prognosticai-fd001")
+MLFLOW_ARTIFACT_LOCATION = os.getenv("MLFLOW_ARTIFACT_LOCATION")  # None = MLflow default
+MLFLOW_REGISTERED_MODEL = "prognosticai-rul-xgb"
+
+# Quality gate used by CI and the Dagster asset check (test-set RMSE, cycles)
+RMSE_GATE = float(os.getenv("PROGNOSTIC_RMSE_GATE", "20.0"))
 
 # ── Alert Thresholds ──────────────────────────────────────────────────────
 THRESHOLD_CRITICAL = 30    # cycles — ground immediately

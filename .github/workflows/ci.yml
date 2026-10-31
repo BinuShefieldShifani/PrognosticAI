@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Validate Dagster definitions
+        run: dagster definitions validate -m pipelines.definitions
+
+      - name: Unit and pipeline tests (synthetic data, CPU)
+        run: pytest
+
+  train-smoke:
+    name: Train on real C-MAPSS data (CPU) + quality gate
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    env:
+      PROGNOSTIC_DEVICE: cpu
+      MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache C-MAPSS data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: cmapss-fd001-${{ hashFiles('download_data.py') }}
+
+      - name: Download and verify data
+        run: python download_data.py
+
+      - name: Train, log to MLflow, enforce RMSE gate
+        run: |
+          python model_trainer.py \
+            --run-name "ci-${GITHUB_SHA::7}" \
+            --metrics-out metrics.json \
+            --fail-above-rmse 20
+
+      - name: Show metrics
+        if: always()
+        run: |
+          echo "### Training metrics" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat metrics.json >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload MLflow run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-run-${{ github.sha }}
+          path: |
+            mlflow.db
+            mlruns/
+            metrics.json
+          retention-days: 14

@@ -2,13 +2,13 @@
 knowledge_base.py — Maintenance Procedure Knowledge Base
 =========================================================
 Simulates what a real MRO (Maintenance, Repair, Overhaul) document database
-would contain. In production this would be GKN's actual ATA-chapter documentation.
+would contain. In production this would be the operator's actual ATA-chapter documentation.
 
 We use simple keyword-based retrieval (no vector DB needed) so it works fully offline.
 The agent searches this KB to attach the correct procedure to each work order.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # ── Maintenance Procedure Dataclass ──────────────────────────────────────

@@ -18,7 +18,7 @@ import os
 import sys
 import urllib.request
 
-DATA_DIR = "data"
+from config import DATA_DIR
 
 BASE_URL = (
     "https://raw.githubusercontent.com/"
@@ -89,14 +89,13 @@ def _verify():
         f"Expected 26 columns, got {len(train.columns)}"
 
     # RUL: expect 100 values
-    import numpy as np
     rul = pd.read_csv(
         os.path.join(DATA_DIR, "RUL_FD001.txt"), header=None
     ).values.flatten()
     assert len(rul) == 100, f"Expected 100 RUL values, got {len(rul)}"
 
     print(f"  train_FD001.txt  : {len(train):,} rows, {train['unit'].nunique()} engines ✓")
-    print(f"  test_FD001.txt   : verified ✓")
+    print("  test_FD001.txt   : verified ✓")
     print(f"  RUL_FD001.txt    : {len(rul)} ground-truth values (range {rul.min()}–{rul.max()}) ✓")
 
 

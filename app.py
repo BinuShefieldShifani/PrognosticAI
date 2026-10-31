@@ -14,15 +14,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 
 from config import (
-    INFORMATIVE_SENSORS, MODEL_PATH, SCALER_PATH,
-    THRESHOLD_CRITICAL, THRESHOLD_HIGH, THRESHOLD_MEDIUM,
+    INFORMATIVE_SENSORS, MODEL_PATH, THRESHOLD_CRITICAL, THRESHOLD_HIGH, THRESHOLD_MEDIUM,
     MAX_RUL, OLLAMA_MODEL,
 )
-from data_processor import load_raw, add_rul_labels, engineer_features, get_engine_data
+from data_processor import load_raw, add_rul_labels, get_engine_data
 
 # ── Page Setup ────────────────────────────────────────────────────────────
 
@@ -40,8 +38,7 @@ st.markdown("""
     <div>
         <h1 style="margin:0;font-size:26px;">PrognosticAI</h1>
         <p style="margin:0;color:gray;font-size:14px;">
-            Turbofan Engine Prognostics & Health Management · NASA C-MAPSS FD001 ·
-            Targeting GKN Aerospace / Volvo CE
+            Turbofan Engine Prognostics & Health Management · NASA C-MAPSS FD001
         </p>
     </div>
 </div>
@@ -264,14 +261,11 @@ with tab2:
     @st.cache_data
     def predict_for_all_cycles(engine_id, split):
         """Run XGBoost RUL prediction on all cycles of an engine for the trend chart."""
-        import joblib
-        from data_processor import scale_features, get_feature_columns
+        from data_processor import scale_features
         from model_trainer import load_model_and_scaler
 
         engine_df = get_engine_data(engine_id, split=split)
         model, scaler = load_model_and_scaler()
-        feat_cols = get_feature_columns()
-        X = engine_df[feat_cols].values
         X_scaled, _ = scale_features(engine_df, fit=False, scaler=scaler)
         y_pred = model.predict(X_scaled).clip(0)
         return engine_df["cycle"].values, y_pred, engine_df.get("rul", pd.Series([])).values
@@ -344,7 +338,7 @@ with tab2:
                 mode="lines", name="True RUL",
                 line=dict(color="#1D9E75", width=2, dash="dot"),
             ))
-        # CI band
+        # Heuristic ±15% band (not a statistical confidence interval)
         margin_arr = np.maximum(pred_rul * 0.15, 5.0)
         fig_trend.add_trace(go.Scatter(
             x=np.concatenate([cycles, cycles[::-1]]),
@@ -352,7 +346,7 @@ with tab2:
             fill="toself",
             fillcolor="rgba(63, 138, 221, 0.12)",
             line=dict(color="rgba(255,255,255,0)"),
-            name="95% CI",
+            name="±15% band",
             showlegend=True,
         ))
         fig_trend.add_trace(go.Scatter(
@@ -368,7 +362,7 @@ with tab2:
                                 line_color=color, annotation_text=label,
                                 annotation_position="bottom right")
         fig_trend.update_layout(
-            title=f"RUL Prediction Over Engine Life",
+            title="RUL Prediction Over Engine Life",
             xaxis_title="Cycle",
             yaxis_title="RUL (cycles)",
             height=320,
