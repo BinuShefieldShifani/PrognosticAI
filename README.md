@@ -7,9 +7,9 @@ Built on NASA C-MAPSS FD001 · XGBoost (GPU/CPU) · MLflow · Dagster · GitHub 
 
 ---
 
-## What It Does (Plain English)
+## What It Does 
 
-A turbofan engine has 21 sensors reporting data every flight cycle (takeoff → cruise → landing). Over time, components like the High Pressure Compressor degrade — blade erosion increases tip clearance, efficiency drops, and eventually the engine fails.
+A turbofan engine has 21 sensors reporting data every flight cycle (takeoff → cruise → landing). Over time, components like the High Pressure Compressor degrade and blade erosion increases tip clearance, efficiency drops, and eventually the engine fails.
 
 **PrognosticAI answers one question: how many cycles until this engine needs maintenance?**
 
