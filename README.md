@@ -38,9 +38,6 @@ If the LLM is unavailable, sensor analysis and RUL prediction still work. Only t
 |---|---|
 | ![RUL prediction](docs/screenshot_rul.png) | ![Sensor trends](docs/screenshot_sensors.png) |
 
-| Agent trace | Work order |
-|---|---|
-| ![Agent trace](docs/screenshot_trace.png) | ![Work order](docs/screenshot_workorder.png) |
 
 ---
 
