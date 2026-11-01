@@ -68,6 +68,7 @@ prognosticai/
 ├── download_data.py             ← fetches NASA C-MAPSS FD001
 ├── data_processor.py            ← loading, validation, RUL labelling, feature engineering
 ├── model_trainer.py             ← XGBoost training and evaluation, MLflow tracking, CLI
+├── rul_predictor.py             ← packaged MLflow model: raw sensor cycles in, RUL out
 ├── pipelines/definitions.py     ← Dagster assets, data-quality checks, weekly schedule
 ├── knowledge_base.py            ← ATA chapter maintenance procedures (MRO-001 to MRO-006)
 ├── agent_graph.py               ← LangGraph agent (5 nodes, conditional routing)
@@ -161,6 +162,37 @@ python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
 Then open http://localhost:5000.
+
+---
+
+## Packaged Model
+
+Every training run produces one self-contained MLflow model (`rul_predictor.py`). It bundles the
+feature spec, the fitted scaler and the XGBoost model, so a caller sends raw sensor cycles and gets
+RUL back. Before this, the model and scaler were two separate files and every caller rebuilt the
+features itself, which meant a retrained model could be loaded next to an old scaler without any error.
+
+```python
+from rul_predictor import load_predictor
+from data_processor import load_raw
+
+predictor = load_predictor()                     # local copy in models/rul_predictor
+# or: mlflow.pyfunc.load_model("runs:/<run_id>/model")
+raw = load_raw("test")
+predictor.predict(raw[raw["unit"] == 3])
+#  unit  last_cycle  history_cycles  short_history   rul   rul_lower  rul_upper
+#     3         126             126          False  55.5        47.1       63.8
+```
+
+- **Input:** one row per cycle with `unit`, `cycle` and the 14 informative sensors. Extra columns are ignored.
+  Missing sensors, nulls and gaps in the cycle sequence are rejected with a clear error.
+- **Output:** one row per engine, predicted at its last observed cycle.
+- **Feature spec travels with the model.** Changing windows or sensors in `config.py` later does not change
+  what an already trained model computes. A test checks this.
+- **Short histories are flagged.** The longest slope window is 80 cycles. Engines with less history still get a
+  prediction, but `short_history` is set. On the FD001 test set this covers 23 of 100 engines, and their RMSE
+  is higher (17.0 vs 10.9). Part of that is because these engines are early in life and have high true RUL.
+- The packaged model reproduces the training metrics exactly from raw data (test RMSE 12.56).
 
 ---
 

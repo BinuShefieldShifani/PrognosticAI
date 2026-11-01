@@ -1,6 +1,10 @@
 """
-model_trainer.py — XGBoost RUL Predictor (v5)
+model_trainer.py — XGBoost RUL Predictor (v6)
 ==============================================
+Changes from v5:
+  - The logged MLflow model is now a packaged pyfunc (rul_predictor.py):
+    raw sensor cycles in, RUL out, with the feature spec and scaler bundled.
+    A local copy is saved to models/rul_predictor for offline use.
 Changes from v4:
   - Trend features (rolling slopes over 10-80 cycles) and longer rolling
     windows, plus shallower trees (depth 5). Chosen with 5-fold engine-level
@@ -33,10 +37,13 @@ from sklearn.model_selection import GroupShuffleSplit
 from config import (
     DATASET, LEARNING_RATE, MAX_RUL, MLFLOW_ARTIFACT_LOCATION,
     MLFLOW_EXPERIMENT, MLFLOW_REGISTERED_MODEL, MLFLOW_TRACKING_URI,
-    MODEL_PATH, N_ESTIMATORS, RANDOM_SEED, RMSE_GATE, RMSE_TARGET,
+    INFORMATIVE_SENSORS, MODEL_PATH, N_ESTIMATORS, PREDICTOR_DIR, RANDOM_SEED, RMSE_GATE, RMSE_TARGET,
     ROLLING_WINDOWS, SCALER_PATH, SLOPE_WINDOWS, VAL_FRACTION, XGB_DEVICE,
 )
-from data_processor import build_test_dataset, build_train_dataset, get_feature_columns
+from data_processor import (
+    build_test_dataset, build_train_dataset, feature_spec, get_feature_columns, load_raw,
+)
+from rul_predictor import heuristic_band, log_predictor, save_predictor
 
 
 def resolve_device(device: str | None = None) -> str:
@@ -140,6 +147,11 @@ def train(n_estimators: int | None = None,
     joblib.dump(model, MODEL_PATH)
     print(f"Model saved → {MODEL_PATH}")
 
+    spec = feature_spec()
+    example = raw_input_example()
+    save_predictor(model, scaler, spec, example, PREDICTOR_DIR)
+    print(f"Packaged model saved → {PREDICTOR_DIR}")
+
     # ── Test Evaluation ───────────────────────────────────────────────────
     print("\nEvaluating on TEST set (last cycle per engine)...")
     X_test, y_test = build_test_dataset(scaler)
@@ -193,19 +205,27 @@ def train(n_estimators: int | None = None,
 
     if log_to_mlflow:
         metrics["mlflow_run_id"] = _log_to_mlflow(
-            model=model, params=model_params(n_estimators, learning_rate, device),
+            model=model, scaler=scaler, spec=spec, input_example=example,
+            params=model_params(n_estimators, learning_rate, device),
             metrics=metrics, importance=importance, predictions=predictions,
-            X_example=X_test[:5], n_features=X_full.shape[1],
+            n_features=X_full.shape[1],
             n_val_engines=n_val_engines, register_model=register_model,
             run_name=run_name,
         )
     return metrics
 
 
-def _log_to_mlflow(model, params, metrics, importance, predictions, X_example,
-                   n_features, n_val_engines, register_model, run_name) -> str:
+def raw_input_example(n_engines: int = 2) -> pd.DataFrame:
+    """A small slice of raw test cycles, used as the packaged model's input example."""
+    df = load_raw("test")
+    units = sorted(df["unit"].unique())[:n_engines]
+    cols = ["unit", "cycle"] + INFORMATIVE_SENSORS
+    return df.loc[df["unit"].isin(units), cols].reset_index(drop=True)
+
+
+def _log_to_mlflow(model, scaler, spec, input_example, params, metrics, importance,
+                   predictions, n_features, n_val_engines, register_model, run_name) -> str:
     import mlflow
-    import mlflow.xgboost
     from mlflow.entities import Metric
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -247,10 +267,8 @@ def _log_to_mlflow(model, params, metrics, importance, predictions, X_example,
             shutil.copy(SCALER_PATH, os.path.join(tmp, "scaler.pkl"))
             mlflow.log_artifacts(tmp, artifact_path="evaluation")
 
-        mlflow.xgboost.log_model(
-            model,
-            name="model",
-            input_example=X_example,
+        log_predictor(
+            model, scaler, spec, input_example,
             registered_model_name=MLFLOW_REGISTERED_MODEL if register_model else None,
         )
         print(f"\nMLflow run logged → {run.info.run_id}  ({MLFLOW_TRACKING_URI})")
@@ -270,8 +288,8 @@ def predict_rul(X_scaled: np.ndarray, model) -> tuple[float, float, float]:
     if X_scaled.ndim == 1:
         X_scaled = X_scaled.reshape(1, -1)
     rul = float(model.predict(X_scaled).clip(0)[0])
-    margin = max(rul * 0.15, 5.0)
-    return rul, max(rul - margin, 0.0), rul + margin
+    lower, upper = heuristic_band(rul)
+    return rul, lower, upper
 
 
 def main(argv=None):
