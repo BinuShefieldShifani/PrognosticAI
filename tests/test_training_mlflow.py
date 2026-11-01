@@ -2,7 +2,7 @@ import mlflow
 import numpy as np
 
 from config import MLFLOW_EXPERIMENT, MLFLOW_TRACKING_URI
-from data_processor import get_feature_columns
+from data_processor import load_raw
 from model_trainer import load_model_and_scaler, train
 
 
@@ -23,10 +23,12 @@ def test_training_run_is_logged_to_mlflow():
     artifacts = {a.path for a in mlflow.MlflowClient().list_artifacts(run.info.run_id, "evaluation")}
     assert {"evaluation/feature_importance.csv", "evaluation/test_predictions.csv"} <= artifacts
 
-    # Logged model loads back and predicts on the full feature input
+    # Logged model is the packaged predictor: raw cycles in, one row per engine out
     model = mlflow.pyfunc.load_model(f"runs:/{run.info.run_id}/model")
-    n_features = len(get_feature_columns())
-    assert model.predict(np.zeros((2, n_features))).shape == (2,)
+    raw = load_raw("test")
+    out = model.predict(raw[raw["unit"].isin([1, 2])])
+    assert list(out["unit"]) == [1, 2]
+    assert (out["rul"] >= 0).all()
 
     # The joblib copy used by the Streamlit app is still written
     xgb_model, scaler = load_model_and_scaler()

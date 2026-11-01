@@ -29,6 +29,25 @@ from config import (
     MAX_RUL, ROLLING_WINDOWS, SLOPE_WINDOWS, SCALER_PATH
 )
 
+# Fixed constant used to normalise the cycle number (max observed in FD001 training).
+CYCLE_NORM_DIVISOR = 400.0
+
+
+# ── Feature Spec ──────────────────────────────────────────────────────────
+
+def feature_spec() -> dict:
+    """
+    The settings that define the feature matrix. A packaged model stores a copy
+    of this, so a model trained today keeps computing the same features even
+    after config.py changes (new windows, different sensors).
+    """
+    return {
+        "sensors": list(INFORMATIVE_SENSORS),
+        "rolling_windows": list(ROLLING_WINDOWS),
+        "slope_windows": list(SLOPE_WINDOWS),
+        "cycle_norm_divisor": CYCLE_NORM_DIVISOR,
+    }
+
 
 # ── Load Raw Data ─────────────────────────────────────────────────────────
 
@@ -101,7 +120,7 @@ def _rolling_slope(values: pd.Series, t: pd.Series, window: int) -> np.ndarray:
     return (cov / var).fillna(0.0).values
 
 
-def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, fit_scaler: bool = True, spec: dict | None = None) -> pd.DataFrame:
     """
     Build the feature matrix used for model training and inference.
 
@@ -112,7 +131,10 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
       = 14 sensors x (1 + 2x4 + 4) = 182 features
 
     Plus: cycle_norm (cycle number scaled by a fixed constant)  → 183 total
+
+    `spec` defaults to the current config (see feature_spec()).
     """
+    spec = spec or feature_spec()
     dfs = []
     for unit_id, group in df.groupby("unit"):
         g = group.sort_values("cycle").copy()
@@ -121,17 +143,17 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
         # CRITICAL: do NOT use g["cycle"].max() here — for test engines, the last
         # observed cycle is NOT the failure cycle, so cycle/max would always be 1.0
         # for every engine's last row, making the model think all engines are dying.
-        g["cycle_norm"] = g["cycle"] / 400.0
+        g["cycle_norm"] = g["cycle"] / spec["cycle_norm_divisor"]
 
         t = g["cycle"].astype(float).reset_index(drop=True)
         new_cols = {}
-        for sensor in INFORMATIVE_SENSORS:
+        for sensor in spec["sensors"]:
             x = g[sensor]
-            for w in ROLLING_WINDOWS:
+            for w in spec["rolling_windows"]:
                 new_cols[f"{sensor}_mean{w}"] = x.rolling(w, min_periods=1).mean().values
                 new_cols[f"{sensor}_std{w}"] = x.rolling(w, min_periods=1).std().fillna(0).values
             x0 = x.reset_index(drop=True)
-            for w in SLOPE_WINDOWS:
+            for w in spec["slope_windows"]:
                 new_cols[f"{sensor}_slope{w}"] = _rolling_slope(x0, t, w)
         g = pd.concat([g, pd.DataFrame(new_cols, index=g.index)], axis=1)
         dfs.append(g)
@@ -140,14 +162,15 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
     return result
 
 
-def get_feature_columns() -> list[str]:
+def get_feature_columns(spec: dict | None = None) -> list[str]:
     """Return the ordered list of feature column names used for training."""
-    base = INFORMATIVE_SENSORS + ["cycle_norm"]
+    spec = spec or feature_spec()
+    base = list(spec["sensors"]) + ["cycle_norm"]
     rolling = []
-    for s in INFORMATIVE_SENSORS:
-        for w in ROLLING_WINDOWS:
+    for s in spec["sensors"]:
+        for w in spec["rolling_windows"]:
             rolling += [f"{s}_mean{w}", f"{s}_std{w}"]
-        for w in SLOPE_WINDOWS:
+        for w in spec["slope_windows"]:
             rolling += [f"{s}_slope{w}"]
     return base + rolling
 

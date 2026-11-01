@@ -50,6 +50,13 @@ SEQUENCE_LENGTH = 30                # look-back window for feature computation
 MODEL_DIR = os.getenv("PROGNOSTIC_MODEL_DIR", "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_rul.pkl")
 SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
+# Self-contained MLflow pyfunc model: raw sensor cycles in, RUL out.
+# Bundles the feature spec, the fitted scaler and the model, so they can never drift apart.
+PREDICTOR_DIR = os.path.join(MODEL_DIR, "rul_predictor")
+
+# Feature engineering needs this much history to match training exactly
+# (longest slope window). Shorter histories still predict, but are flagged.
+MIN_HISTORY_CYCLES = 80
 
 # "auto" picks cuda when an NVIDIA GPU is visible, otherwise cpu.
 XGB_DEVICE = os.getenv("PROGNOSTIC_DEVICE", "auto")
