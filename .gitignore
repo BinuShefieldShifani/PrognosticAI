@@ -15,3 +15,6 @@ tmp*/
 .ruff_cache/
 reports/
 mlflow-run.zip
+
+# patch files passed around between branches
+*.patch
