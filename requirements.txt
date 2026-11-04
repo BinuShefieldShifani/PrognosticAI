@@ -16,3 +16,5 @@ numpy<2; sys_platform == "darwin" and platform_machine == "x86_64"
 pandas<3; sys_platform == "darwin" and platform_machine == "x86_64"
 scipy<1.16; sys_platform == "darwin" and platform_machine == "x86_64"
 contourpy<1.4; sys_platform == "darwin" and platform_machine == "x86_64"
+fastapi>=0.110
+uvicorn>=0.29

@@ -3,9 +3,11 @@
 [![CI](https://github.com/BinuShefieldShifani/PrognosticAI/actions/workflows/ci.yml/badge.svg)](https://github.com/BinuShefieldShifani/PrognosticAI/actions/workflows/ci.yml)
 
 **Predictive maintenance pipeline for turbofan engines, from raw sensor data to maintenance work orders.**
-Built on NASA C-MAPSS FD001 · XGBoost (GPU/CPU) · MLflow · Dagster · GitHub Actions · LangGraph · Local LLM (Ollama) · Elasticsearch (BM25 + kNN)
+Built on NASA C-MAPSS FD001 · XGBoost (GPU/CPU) · MLflow · Dagster · GitHub Actions · LangGraph · Local LLM (Ollama) · Elasticsearch (BM25 + kNN) · FastAPI · Docker
 
 > **Result:** test RMSE 12.6 cycles (MAE 9.4) and NASA score 243 on the FD001 test set. Every training run is tracked in MLflow, the pipeline runs as Dagster assets with data-quality checks, and CI fails the build if accuracy regresses.
+>
+> **Serving:** the champion model runs behind a FastAPI service in Docker. CI builds the image, serves a freshly trained model and checks that the container returns the same predictions as the model run directly in Python.
 >
 > **Retrieval:** hybrid Elasticsearch search (BM25 + dense kNN, fused with RRF) finds the right maintenance procedure in the top 2 for 98% of 48 labelled queries, up from 81% with the original keyword matcher (MRR 0.809 to 0.955).
 
@@ -77,6 +79,10 @@ prognosticai/
 ├── promote.py                   ← promotion CLI
 ├── run_pipeline.py              ← whole pipeline in one command (used by CI and Kaggle)
 ├── report.py                    ← model comparison report from the registry
+├── serve.py                     ← FastAPI service for the champion model
+├── export_model.py              ← copies the champion out of the registry for the container
+├── serve_smoke.py               ← end-to-end check of a running API on real engines
+├── Dockerfile                   ← API image (model mounted at run time, not baked in)
 ├── pipelines/definitions.py     ← Dagster assets, data-quality checks, weekly schedule
 ├── knowledge_base.py            ← ATA chapter maintenance procedures (MRO-001 to MRO-006)
 ├── procedure_search.py          ← picks the retriever (keyword default, Elasticsearch optional)
@@ -89,7 +95,7 @@ prognosticai/
 ├── tests/                       ← pytest suite on synthetic C-MAPSS-format data
 ├── notebooks/kaggle_train.ipynb ← calls the scripts on a Kaggle GPU, no logic in the notebook
 ├── docs/                        ← screenshots
-└── .github/workflows/ci.yml     ← lint, tests, real-data training and RMSE gate
+└── .github/workflows/ci.yml     ← lint, tests, real-data training, retrieval eval, API container
 ```
 
 ---
@@ -250,6 +256,50 @@ and the gap (2.2 cycles) is well beyond the promotion margin. The LSTM here is u
 
 ---
 
+## Serving API (FastAPI + Docker)
+
+The champion is served over REST. The API loads whatever `PROGNOSTIC_MODEL_URI` points to: by default the registry champion (`models:/prognosticai-rul@champion`), in Docker a folder mounted at `/models/champion`. Because XGBoost and LSTM packages share one contract, the API does not care which architecture won.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /health` | 200 when a model is loaded, 503 when not, so it works as a readiness probe |
+| `GET /model` | model type, registry version and its validation/test RMSE |
+| `POST /predict` | raw sensor cycles in, RUL per engine out (or per cycle with `"all_cycles": true`) |
+| `POST /reload` | loads the model again after a new champion is promoted (needs `X-Admin-Token` if `PROGNOSTIC_ADMIN_TOKEN` is set) |
+
+Bad input gets a 422 that says what is wrong (a missing sensor, a gap in the cycle sequence, a non-numeric value) instead of a stack trace. Every prediction is logged with the model version, number of engines and latency, and the response carries `X-Model-Type` and `X-Model-Version` headers.
+
+### Run it locally
+
+```bash
+python run_pipeline.py            # train both models and promote a champion (if not done yet)
+uvicorn serve:app --port 8000     # then open http://localhost:8000/docs
+python serve_smoke.py             # sends five FD001 test engines and checks the answers
+```
+
+### Run it in Docker
+
+The registry stores absolute paths from the training machine, so the champion is first copied out of it into a plain folder. The model is mounted, not baked into the image, so promoting a new champion needs no rebuild.
+
+```bash
+python export_model.py                      # registry champion -> serving/champion
+docker build -t prognosticai-api .          # add --build-arg WITH_TORCH=0 for a smaller, XGBoost-only image
+docker run -p 8000:8000 -v "$PWD/serving/champion:/models/champion:ro" prognosticai-api
+python serve_smoke.py --compare-local serving/champion
+```
+
+Example request:
+
+```bash
+curl -s localhost:8000/predict -H "Content-Type: application/json" -d '{"cycles": [
+  {"unit": 3, "cycle": 1, "s2": 642.4, "s3": 1585.3, "...": "every sensor the model was trained on"},
+  ...]}'
+```
+
+Measured once on FD001 (5 test engines, 410 cycles, a single CPU core): the XGBoost champion answered in about 280 ms and the LSTM challenger in about 45 ms, both identical to the same package run directly in Python. The XGBoost time is mostly feature engineering (183 rolling and slope features per cycle).
+
+---
+
 ## Pipeline Orchestration (Dagster)
 
 ```
@@ -287,6 +337,7 @@ GitHub Actions runs on every push to `main` and on every pull request:
 1. `ruff`, Dagster definition validation and `pytest` (including a 2-epoch LSTM and the promotion rules)
 2. `run_pipeline.py` on the real FD001 data (CPU PyTorch, 15 LSTM epochs). The build fails if any gate fails. The comparison report appears in the job summary and the MLflow store is uploaded as a build artifact.
 3. Procedure retrieval eval against a real Elasticsearch 8.15 service container. The build fails if hybrid retrieval scores below the keyword baseline.
+4. API container: trains the XGBoost package on FD001, builds the Docker image, starts it with the model mounted, and runs `serve_smoke.py` against it. The build fails if the container's predictions differ from the same package run locally.
 
 ---
 
