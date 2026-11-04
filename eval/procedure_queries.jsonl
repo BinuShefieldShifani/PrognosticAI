@@ -1,0 +1,48 @@
+{"qid": "q01", "category": "agent_output", "query": "HPC (High Pressure Compressor) Degradation — blade erosion, tip clearance loss", "relevant": {"MRO-001": 2}}
+{"qid": "q02", "category": "agent_output", "query": "HPT (High Pressure Turbine) Degradation — thermal fatigue, TBC spallation", "relevant": {"MRO-002": 2}}
+{"qid": "q03", "category": "agent_output", "query": "Fan Degradation / FOD — leading edge erosion, imbalance", "relevant": {"MRO-003": 2}}
+{"qid": "q04", "category": "agent_output", "query": "Bearing Wear — oil contamination, vibration", "relevant": {"MRO-004": 2}}
+{"qid": "q05", "category": "agent_output", "query": "General Engine Degradation — EGT margin loss, performance restoration needed", "relevant": {"MRO-005": 2}}
+{"qid": "q06", "category": "agent_output", "query": "HPC Degradation", "relevant": {"MRO-001": 2}}
+{"qid": "q07", "category": "agent_output", "query": "High Pressure Compressor Degradation", "relevant": {"MRO-001": 2}}
+{"qid": "q08", "category": "agent_output", "query": "High Pressure Turbine Degradation", "relevant": {"MRO-002": 2}}
+{"qid": "q09", "category": "agent_output", "query": "Fan Degradation", "relevant": {"MRO-003": 2}}
+{"qid": "q10", "category": "agent_output", "query": "General Engine Degradation", "relevant": {"MRO-005": 2}}
+{"qid": "q11", "category": "paraphrase", "query": "compressor efficiency is dropping because the blades are worn and the gap at the blade tips has grown", "relevant": {"MRO-001": 2}}
+{"qid": "q12", "category": "paraphrase", "query": "dirty compressor that needs a wash", "relevant": {"MRO-001": 2}}
+{"qid": "q13", "category": "paraphrase", "query": "turbine blades overheating and the ceramic coating is flaking off", "relevant": {"MRO-002": 2}}
+{"qid": "q14", "category": "paraphrase", "query": "hot section distress with cracked turbine blades from repeated heating cycles", "relevant": {"MRO-002": 2}}
+{"qid": "q15", "category": "paraphrase", "query": "bird strike damaged the front of the engine", "relevant": {"MRO-003": 2}}
+{"qid": "q16", "category": "paraphrase", "query": "dents and nicks on the large blades at the intake", "relevant": {"MRO-003": 2}}
+{"qid": "q17", "category": "paraphrase", "query": "engine is shaking more than usual", "relevant": {"MRO-004": 2, "MRO-003": 1}}
+{"qid": "q18", "category": "paraphrase", "query": "metal particles showing up in the lubricant", "relevant": {"MRO-004": 2}}
+{"qid": "q19", "category": "paraphrase", "query": "the engine burns more fuel and makes less thrust than when it was new", "relevant": {"MRO-005": 2}}
+{"qid": "q20", "category": "paraphrase", "query": "exhaust gas temperature margin is almost used up", "relevant": {"MRO-005": 2}}
+{"qid": "q21", "category": "paraphrase", "query": "rolling element bearings are wearing out", "relevant": {"MRO-004": 2}}
+{"qid": "q22", "category": "paraphrase", "query": "rotor imbalance after debris was ingested", "relevant": {"MRO-003": 2, "MRO-004": 1}}
+{"qid": "q23", "category": "paraphrase", "query": "turbine section running hot and the coating is wearing thin", "relevant": {"MRO-002": 2}}
+{"qid": "q24", "category": "paraphrase", "query": "loss of surge margin in the core compressor", "relevant": {"MRO-001": 2, "MRO-005": 1}}
+{"qid": "q25", "category": "symptom", "query": "rising HPC outlet temperature and falling HPC outlet static pressure", "relevant": {"MRO-001": 2}}
+{"qid": "q26", "category": "symptom", "query": "T30 increasing and Ps30 dropping, compressor losing efficiency", "relevant": {"MRO-001": 2}}
+{"qid": "q27", "category": "symptom", "query": "high EGT and rising fuel flow trend over many cycles", "relevant": {"MRO-005": 2}}
+{"qid": "q28", "category": "symptom", "query": "oil pressure fluctuating and the chip light came on", "relevant": {"MRO-004": 2}}
+{"qid": "q29", "category": "symptom", "query": "vibration increase on the fan module after a ground debris strike", "relevant": {"MRO-003": 2, "MRO-004": 1}}
+{"qid": "q30", "category": "symptom", "query": "turbine inlet temperature exceedance during takeoff", "relevant": {"MRO-002": 2}}
+{"qid": "q31", "category": "procedure", "query": "borescope inspection of the compressor stages", "relevant": {"MRO-001": 2}}
+{"qid": "q32", "category": "procedure", "query": "fluorescent penetrant inspection of turbine blades", "relevant": {"MRO-002": 2}}
+{"qid": "q33", "category": "procedure", "query": "blend repair of leading edge nicks", "relevant": {"MRO-003": 2}}
+{"qid": "q34", "category": "procedure", "query": "spectrometric oil analysis sample", "relevant": {"MRO-004": 2}}
+{"qid": "q35", "category": "procedure", "query": "full engine disassembly and test cell run", "relevant": {"MRO-005": 2}}
+{"qid": "q36", "category": "procedure", "query": "measure tip clearance against the serviceable limit", "relevant": {"MRO-001": 2}}
+{"qid": "q37", "category": "procedure", "query": "cooling hole flow check", "relevant": {"MRO-002": 2}}
+{"qid": "q38", "category": "procedure", "query": "fan trim balance after repair", "relevant": {"MRO-003": 2}}
+{"qid": "q39", "category": "procedure", "query": "inspect the magnetic chip detector", "relevant": {"MRO-004": 2}}
+{"qid": "q40", "category": "procedure", "query": "module level overhaul to restore performance", "relevant": {"MRO-005": 2}}
+{"qid": "q41", "category": "reference", "query": "ATA 72-30", "relevant": {"MRO-001": 2}}
+{"qid": "q42", "category": "reference", "query": "ATA 72-50 inspection", "relevant": {"MRO-002": 2}}
+{"qid": "q43", "category": "reference", "query": "AMM 72-10-05", "relevant": {"MRO-003": 2}}
+{"qid": "q44", "category": "reference", "query": "ATA 72-80 oil system", "relevant": {"MRO-004": 2}}
+{"qid": "q45", "category": "reference", "query": "order HPT shroud segments and platform seals", "relevant": {"MRO-002": 2}}
+{"qid": "q46", "category": "reference", "query": "need a compressor wash kit and borescope plugs", "relevant": {"MRO-001": 2}}
+{"qid": "q47", "category": "reference", "query": "combustion liner and LPT blades for the shop visit", "relevant": {"MRO-005": 2}}
+{"qid": "q48", "category": "reference", "query": "oil filter assembly replacement", "relevant": {"MRO-004": 2}}
