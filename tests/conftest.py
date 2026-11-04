@@ -8,6 +8,13 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+import platform
+
+# Intel Macs are stuck on PyTorch 2.2.2. Its OpenMP threads clash with XGBoost's
+# and crash the process with a segfault. One OpenMP thread avoids that.
+# Linux CI and Kaggle are unaffected.
+if sys.platform == "darwin" and platform.machine() == "x86_64":
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
 import pytest
