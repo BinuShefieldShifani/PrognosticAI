@@ -13,3 +13,5 @@ metrics.json
 tmp*/
 .pytest_cache/
 .ruff_cache/
+reports/
+mlflow-run.zip

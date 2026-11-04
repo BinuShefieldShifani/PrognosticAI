@@ -1,0 +1,612 @@
+From f7a10a4fbe0abeffef955ccbfe49aac636b3c9ed Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Sun, 1 Nov 2026 04:46:53 +0000
+Subject: [PATCH] Package model as MLflow pyfunc: raw cycles in, RUL out
+
+---
+ README.md                     |  32 ++++++
+ config.py                     |   7 ++
+ data_processor.py             |  43 ++++++--
+ model_trainer.py              |  46 +++++---
+ rul_predictor.py              | 198 ++++++++++++++++++++++++++++++++++
+ tests/test_rul_predictor.py   |  91 ++++++++++++++++
+ tests/test_training_mlflow.py |  10 +-
+ 7 files changed, 399 insertions(+), 28 deletions(-)
+ create mode 100644 rul_predictor.py
+ create mode 100644 tests/test_rul_predictor.py
+
+diff --git a/README.md b/README.md
+index 6778bd7..44f13dc 100644
+--- a/README.md
++++ b/README.md
+@@ -68,6 +68,7 @@ prognosticai/
+ ├── download_data.py             ← fetches NASA C-MAPSS FD001
+ ├── data_processor.py            ← loading, validation, RUL labelling, feature engineering
+ ├── model_trainer.py             ← XGBoost training and evaluation, MLflow tracking, CLI
++├── rul_predictor.py             ← packaged MLflow model: raw sensor cycles in, RUL out
+ ├── pipelines/definitions.py     ← Dagster assets, data-quality checks, weekly schedule
+ ├── knowledge_base.py            ← ATA chapter maintenance procedures (MRO-001 to MRO-006)
+ ├── agent_graph.py               ← LangGraph agent (5 nodes, conditional routing)
+@@ -164,6 +165,37 @@ Then open http://localhost:5000.
+ 
+ ---
+ 
++## Packaged Model
++
++Every training run produces one self-contained MLflow model (`rul_predictor.py`). It bundles the
++feature spec, the fitted scaler and the XGBoost model, so a caller sends raw sensor cycles and gets
++RUL back. Before this, the model and scaler were two separate files and every caller rebuilt the
++features itself, which meant a retrained model could be loaded next to an old scaler without any error.
++
++```python
++from rul_predictor import load_predictor
++from data_processor import load_raw
++
++predictor = load_predictor()                     # local copy in models/rul_predictor
++# or: mlflow.pyfunc.load_model("runs:/<run_id>/model")
++raw = load_raw("test")
++predictor.predict(raw[raw["unit"] == 3])
++#  unit  last_cycle  history_cycles  short_history   rul   rul_lower  rul_upper
++#     3         126             126          False  55.5        47.1       63.8
++```
++
++- **Input:** one row per cycle with `unit`, `cycle` and the 14 informative sensors. Extra columns are ignored.
++  Missing sensors, nulls and gaps in the cycle sequence are rejected with a clear error.
++- **Output:** one row per engine, predicted at its last observed cycle.
++- **Feature spec travels with the model.** Changing windows or sensors in `config.py` later does not change
++  what an already trained model computes. A test checks this.
++- **Short histories are flagged.** The longest slope window is 80 cycles. Engines with less history still get a
++  prediction, but `short_history` is set. On the FD001 test set this covers 23 of 100 engines, and their RMSE
++  is higher (17.0 vs 10.9). Part of that is because these engines are early in life and have high true RUL.
++- The packaged model reproduces the training metrics exactly from raw data (test RMSE 12.56).
++
++---
++
+ ## Pipeline Orchestration (Dagster)
+ 
+ ```
+diff --git a/config.py b/config.py
+index c1bfd7a..4d1aeaa 100644
+--- a/config.py
++++ b/config.py
+@@ -50,6 +50,13 @@ SEQUENCE_LENGTH = 30                # look-back window for feature computation
+ MODEL_DIR = os.getenv("PROGNOSTIC_MODEL_DIR", "models")
+ MODEL_PATH = os.path.join(MODEL_DIR, "xgboost_rul.pkl")
+ SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
++# Self-contained MLflow pyfunc model: raw sensor cycles in, RUL out.
++# Bundles the feature spec, the fitted scaler and the model, so they can never drift apart.
++PREDICTOR_DIR = os.path.join(MODEL_DIR, "rul_predictor")
++
++# Feature engineering needs this much history to match training exactly
++# (longest slope window). Shorter histories still predict, but are flagged.
++MIN_HISTORY_CYCLES = 80
+ 
+ # "auto" picks cuda when an NVIDIA GPU is visible, otherwise cpu.
+ XGB_DEVICE = os.getenv("PROGNOSTIC_DEVICE", "auto")
+diff --git a/data_processor.py b/data_processor.py
+index 8a8278d..e0cf9a0 100644
+--- a/data_processor.py
++++ b/data_processor.py
+@@ -29,6 +29,25 @@ from config import (
+     MAX_RUL, ROLLING_WINDOWS, SLOPE_WINDOWS, SCALER_PATH
+ )
+ 
++# Fixed constant used to normalise the cycle number (max observed in FD001 training).
++CYCLE_NORM_DIVISOR = 400.0
++
++
++# ── Feature Spec ──────────────────────────────────────────────────────────
++
++def feature_spec() -> dict:
++    """
++    The settings that define the feature matrix. A packaged model stores a copy
++    of this, so a model trained today keeps computing the same features even
++    after config.py changes (new windows, different sensors).
++    """
++    return {
++        "sensors": list(INFORMATIVE_SENSORS),
++        "rolling_windows": list(ROLLING_WINDOWS),
++        "slope_windows": list(SLOPE_WINDOWS),
++        "cycle_norm_divisor": CYCLE_NORM_DIVISOR,
++    }
++
+ 
+ # ── Load Raw Data ─────────────────────────────────────────────────────────
+ 
+@@ -101,7 +120,7 @@ def _rolling_slope(values: pd.Series, t: pd.Series, window: int) -> np.ndarray:
+     return (cov / var).fillna(0.0).values
+ 
+ 
+-def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame:
++def engineer_features(df: pd.DataFrame, fit_scaler: bool = True, spec: dict | None = None) -> pd.DataFrame:
+     """
+     Build the feature matrix used for model training and inference.
+ 
+@@ -112,7 +131,10 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
+       = 14 sensors x (1 + 2x4 + 4) = 182 features
+ 
+     Plus: cycle_norm (cycle number scaled by a fixed constant)  → 183 total
++
++    `spec` defaults to the current config (see feature_spec()).
+     """
++    spec = spec or feature_spec()
+     dfs = []
+     for unit_id, group in df.groupby("unit"):
+         g = group.sort_values("cycle").copy()
+@@ -121,17 +143,17 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
+         # CRITICAL: do NOT use g["cycle"].max() here — for test engines, the last
+         # observed cycle is NOT the failure cycle, so cycle/max would always be 1.0
+         # for every engine's last row, making the model think all engines are dying.
+-        g["cycle_norm"] = g["cycle"] / 400.0
++        g["cycle_norm"] = g["cycle"] / spec["cycle_norm_divisor"]
+ 
+         t = g["cycle"].astype(float).reset_index(drop=True)
+         new_cols = {}
+-        for sensor in INFORMATIVE_SENSORS:
++        for sensor in spec["sensors"]:
+             x = g[sensor]
+-            for w in ROLLING_WINDOWS:
++            for w in spec["rolling_windows"]:
+                 new_cols[f"{sensor}_mean{w}"] = x.rolling(w, min_periods=1).mean().values
+                 new_cols[f"{sensor}_std{w}"] = x.rolling(w, min_periods=1).std().fillna(0).values
+             x0 = x.reset_index(drop=True)
+-            for w in SLOPE_WINDOWS:
++            for w in spec["slope_windows"]:
+                 new_cols[f"{sensor}_slope{w}"] = _rolling_slope(x0, t, w)
+         g = pd.concat([g, pd.DataFrame(new_cols, index=g.index)], axis=1)
+         dfs.append(g)
+@@ -140,14 +162,15 @@ def engineer_features(df: pd.DataFrame, fit_scaler: bool = True) -> pd.DataFrame
+     return result
+ 
+ 
+-def get_feature_columns() -> list[str]:
++def get_feature_columns(spec: dict | None = None) -> list[str]:
+     """Return the ordered list of feature column names used for training."""
+-    base = INFORMATIVE_SENSORS + ["cycle_norm"]
++    spec = spec or feature_spec()
++    base = list(spec["sensors"]) + ["cycle_norm"]
+     rolling = []
+-    for s in INFORMATIVE_SENSORS:
+-        for w in ROLLING_WINDOWS:
++    for s in spec["sensors"]:
++        for w in spec["rolling_windows"]:
+             rolling += [f"{s}_mean{w}", f"{s}_std{w}"]
+-        for w in SLOPE_WINDOWS:
++        for w in spec["slope_windows"]:
+             rolling += [f"{s}_slope{w}"]
+     return base + rolling
+ 
+diff --git a/model_trainer.py b/model_trainer.py
+index f0694a6..b53135d 100644
+--- a/model_trainer.py
++++ b/model_trainer.py
+@@ -1,6 +1,10 @@
+ """
+-model_trainer.py — XGBoost RUL Predictor (v5)
++model_trainer.py — XGBoost RUL Predictor (v6)
+ ==============================================
++Changes from v5:
++  - The logged MLflow model is now a packaged pyfunc (rul_predictor.py):
++    raw sensor cycles in, RUL out, with the feature spec and scaler bundled.
++    A local copy is saved to models/rul_predictor for offline use.
+ Changes from v4:
+   - Trend features (rolling slopes over 10-80 cycles) and longer rolling
+     windows, plus shallower trees (depth 5). Chosen with 5-fold engine-level
+@@ -33,10 +37,13 @@ from sklearn.model_selection import GroupShuffleSplit
+ from config import (
+     DATASET, LEARNING_RATE, MAX_RUL, MLFLOW_ARTIFACT_LOCATION,
+     MLFLOW_EXPERIMENT, MLFLOW_REGISTERED_MODEL, MLFLOW_TRACKING_URI,
+-    MODEL_PATH, N_ESTIMATORS, RANDOM_SEED, RMSE_GATE, RMSE_TARGET,
++    INFORMATIVE_SENSORS, MODEL_PATH, N_ESTIMATORS, PREDICTOR_DIR, RANDOM_SEED, RMSE_GATE, RMSE_TARGET,
+     ROLLING_WINDOWS, SCALER_PATH, SLOPE_WINDOWS, VAL_FRACTION, XGB_DEVICE,
+ )
+-from data_processor import build_test_dataset, build_train_dataset, get_feature_columns
++from data_processor import (
++    build_test_dataset, build_train_dataset, feature_spec, get_feature_columns, load_raw,
++)
++from rul_predictor import heuristic_band, log_predictor, save_predictor
+ 
+ 
+ def resolve_device(device: str | None = None) -> str:
+@@ -140,6 +147,11 @@ def train(n_estimators: int | None = None,
+     joblib.dump(model, MODEL_PATH)
+     print(f"Model saved → {MODEL_PATH}")
+ 
++    spec = feature_spec()
++    example = raw_input_example()
++    save_predictor(model, scaler, spec, example, PREDICTOR_DIR)
++    print(f"Packaged model saved → {PREDICTOR_DIR}")
++
+     # ── Test Evaluation ───────────────────────────────────────────────────
+     print("\nEvaluating on TEST set (last cycle per engine)...")
+     X_test, y_test = build_test_dataset(scaler)
+@@ -193,19 +205,27 @@ def train(n_estimators: int | None = None,
+ 
+     if log_to_mlflow:
+         metrics["mlflow_run_id"] = _log_to_mlflow(
+-            model=model, params=model_params(n_estimators, learning_rate, device),
++            model=model, scaler=scaler, spec=spec, input_example=example,
++            params=model_params(n_estimators, learning_rate, device),
+             metrics=metrics, importance=importance, predictions=predictions,
+-            X_example=X_test[:5], n_features=X_full.shape[1],
++            n_features=X_full.shape[1],
+             n_val_engines=n_val_engines, register_model=register_model,
+             run_name=run_name,
+         )
+     return metrics
+ 
+ 
+-def _log_to_mlflow(model, params, metrics, importance, predictions, X_example,
+-                   n_features, n_val_engines, register_model, run_name) -> str:
++def raw_input_example(n_engines: int = 2) -> pd.DataFrame:
++    """A small slice of raw test cycles, used as the packaged model's input example."""
++    df = load_raw("test")
++    units = sorted(df["unit"].unique())[:n_engines]
++    cols = ["unit", "cycle"] + INFORMATIVE_SENSORS
++    return df.loc[df["unit"].isin(units), cols].reset_index(drop=True)
++
++
++def _log_to_mlflow(model, scaler, spec, input_example, params, metrics, importance,
++                   predictions, n_features, n_val_engines, register_model, run_name) -> str:
+     import mlflow
+-    import mlflow.xgboost
+     from mlflow.entities import Metric
+ 
+     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+@@ -247,10 +267,8 @@ def _log_to_mlflow(model, params, metrics, importance, predictions, X_example,
+             shutil.copy(SCALER_PATH, os.path.join(tmp, "scaler.pkl"))
+             mlflow.log_artifacts(tmp, artifact_path="evaluation")
+ 
+-        mlflow.xgboost.log_model(
+-            model,
+-            name="model",
+-            input_example=X_example,
++        log_predictor(
++            model, scaler, spec, input_example,
+             registered_model_name=MLFLOW_REGISTERED_MODEL if register_model else None,
+         )
+         print(f"\nMLflow run logged → {run.info.run_id}  ({MLFLOW_TRACKING_URI})")
+@@ -270,8 +288,8 @@ def predict_rul(X_scaled: np.ndarray, model) -> tuple[float, float, float]:
+     if X_scaled.ndim == 1:
+         X_scaled = X_scaled.reshape(1, -1)
+     rul = float(model.predict(X_scaled).clip(0)[0])
+-    margin = max(rul * 0.15, 5.0)
+-    return rul, max(rul - margin, 0.0), rul + margin
++    lower, upper = heuristic_band(rul)
++    return rul, lower, upper
+ 
+ 
+ def main(argv=None):
+diff --git a/rul_predictor.py b/rul_predictor.py
+new file mode 100644
+index 0000000..b4c94e1
+--- /dev/null
++++ b/rul_predictor.py
+@@ -0,0 +1,198 @@
++"""
++rul_predictor.py — Packaged RUL model (MLflow pyfunc)
++======================================================
++Before this module the trained model and the scaler lived in two separate
++files, and every caller had to rebuild the features itself. Nothing stopped a
++retrained model from being loaded next to an old scaler.
++
++RULPredictor bundles three things into one MLflow model:
++  - feature_spec.json : the sensors and windows the model was trained with
++  - scaler.pkl        : the fitted MinMaxScaler
++  - xgboost_model.json: the XGBoost model in its native, version-portable format
++
++Contract
++  input : raw C-MAPSS cycles, one row per cycle
++          columns: unit, cycle, and every sensor in the feature spec
++          (extra columns such as os1-os3 are ignored)
++  output: one row per engine, predicted at its last observed cycle
++          unit, last_cycle, history_cycles, short_history, rul, rul_lower, rul_upper
++
++The same contract will be used by the LSTM challenger and the FastAPI service,
++so callers never need to know which model is behind it.
++"""
++
++import json
++import os
++import shutil
++import tempfile
++from importlib.metadata import version
++
++import joblib
++import mlflow
++import numpy as np
++import pandas as pd
++
++from config import MIN_HISTORY_CYCLES
++
++OUTPUT_COLUMNS = ["unit", "last_cycle", "history_cycles", "short_history",
++                  "rul", "rul_lower", "rul_upper"]
++
++
++# ── Input validation ──────────────────────────────────────────────────────
++
++def validate_input(df: pd.DataFrame, sensors: list[str]) -> list[str]:
++    """Return a list of problems with an inference request (empty = usable)."""
++    if not isinstance(df, pd.DataFrame):
++        return [f"expected a pandas DataFrame, got {type(df).__name__}"]
++    required = ["unit", "cycle"] + list(sensors)
++    missing = [c for c in required if c not in df.columns]
++    if missing:
++        return [f"missing columns: {missing}"]
++    if df.empty:
++        return ["no rows"]
++
++    problems = []
++    non_numeric = [c for c in required if not pd.api.types.is_numeric_dtype(df[c])]
++    if non_numeric:
++        problems.append(f"non-numeric columns: {non_numeric}")
++        return problems
++    nulls = [c for c in required if df[c].isna().any()]
++    if nulls:
++        problems.append(f"null values in: {nulls}")
++    for unit, g in df.groupby("unit"):
++        cycles = g["cycle"].values
++        if not (np.diff(cycles) == 1).all():
++            problems.append(f"engine {unit}: cycles must be consecutive and in order")
++    return problems
++
++
++def heuristic_band(rul: float) -> tuple[float, float]:
++    """±15% band (minimum ±5 cycles). A heuristic, not a statistical interval."""
++    margin = max(rul * 0.15, 5.0)
++    return max(rul - margin, 0.0), rul + margin
++
++
++# ── The packaged model ────────────────────────────────────────────────────
++
++class RULPredictor(mlflow.pyfunc.PythonModel):
++    """Raw sensor cycles in, RUL per engine out."""
++
++    def load_context(self, context):
++        import xgboost as xgb
++
++        with open(context.artifacts["feature_spec"]) as f:
++            self.spec = json.load(f)
++        self.scaler = joblib.load(context.artifacts["scaler"])
++        self.model = xgb.XGBRegressor()
++        self.model.load_model(context.artifacts["model"])
++
++    def predict(self, context, model_input: pd.DataFrame, params=None) -> pd.DataFrame:
++        from data_processor import engineer_features, get_feature_columns
++
++        problems = validate_input(model_input, self.spec["sensors"])
++        if problems:
++            raise ValueError("Invalid RUL request: " + "; ".join(problems))
++
++        cols = ["unit", "cycle"] + self.spec["sensors"]
++        feats = engineer_features(model_input[cols].copy(), fit_scaler=False, spec=self.spec)
++        last = feats.loc[feats.groupby("unit")["cycle"].idxmax()].sort_values("unit")
++
++        X = self.scaler.transform(last[get_feature_columns(self.spec)].values)
++        rul = self.model.predict(X).clip(0)
++
++        history = model_input.groupby("unit")["cycle"].size().reindex(last["unit"]).values
++        bands = [heuristic_band(float(r)) for r in rul]
++        return pd.DataFrame({
++            "unit": last["unit"].astype("int64").values,
++            "last_cycle": last["cycle"].astype("int64").values,
++            "history_cycles": history.astype("int64"),
++            "short_history": history < MIN_HISTORY_CYCLES,
++            "rul": rul.astype("float64"),
++            "rul_lower": [b[0] for b in bands],
++            "rul_upper": [b[1] for b in bands],
++        })[OUTPUT_COLUMNS]
++
++
++# ── Building, logging and loading ─────────────────────────────────────────
++
++def _pip_requirements() -> list[str]:
++    pkgs = ["mlflow", "xgboost", "scikit-learn", "pandas", "numpy", "joblib"]
++    return [f"{p}=={version(p)}" for p in pkgs]
++
++
++def _code_paths() -> list[str]:
++    here = os.path.dirname(os.path.abspath(__file__))
++    return [os.path.join(here, f) for f in ("rul_predictor.py", "data_processor.py", "config.py")]
++
++
++def _write_artifacts(model, scaler, spec: dict, tmp: str) -> dict:
++    paths = {
++        "model": os.path.join(tmp, "xgboost_model.json"),
++        "scaler": os.path.join(tmp, "scaler.pkl"),
++        "feature_spec": os.path.join(tmp, "feature_spec.json"),
++    }
++    model.save_model(paths["model"])
++    joblib.dump(scaler, paths["scaler"])
++    with open(paths["feature_spec"], "w") as f:
++        json.dump(spec, f, indent=2)
++    return paths
++
++
++def _signature(input_example: pd.DataFrame, model, scaler, spec: dict):
++    """Infer the signature by running the real predictor on the example."""
++    from mlflow.models import infer_signature
++
++    with tempfile.TemporaryDirectory() as tmp:
++        artifacts = _write_artifacts(model, scaler, spec, tmp)
++        predictor = RULPredictor()
++        predictor.load_context(type("Ctx", (), {"artifacts": artifacts})())
++        output = predictor.predict(None, input_example)
++    return infer_signature(input_example, output)
++
++
++def log_predictor(model, scaler, spec: dict, input_example: pd.DataFrame,
++                  registered_model_name: str | None = None):
++    """Log the packaged model to the active MLflow run under the name 'model'."""
++    signature = _signature(input_example, model, scaler, spec)
++    with tempfile.TemporaryDirectory() as tmp:
++        return mlflow.pyfunc.log_model(
++            name="model",
++            python_model=RULPredictor(),
++            artifacts=_write_artifacts(model, scaler, spec, tmp),
++            code_paths=_code_paths(),
++            pip_requirements=_pip_requirements(),
++            signature=signature,
++            input_example=input_example,
++            registered_model_name=registered_model_name,
++        )
++
++
++def save_predictor(model, scaler, spec: dict, input_example: pd.DataFrame, path: str) -> str:
++    """Save the packaged model to a local folder, for offline use without MLflow tracking."""
++    signature = _signature(input_example, model, scaler, spec)
++    if os.path.exists(path):
++        shutil.rmtree(path)
++    with tempfile.TemporaryDirectory() as tmp:
++        mlflow.pyfunc.save_model(
++            path=path,
++            python_model=RULPredictor(),
++            artifacts=_write_artifacts(model, scaler, spec, tmp),
++            code_paths=_code_paths(),
++            pip_requirements=_pip_requirements(),
++            signature=signature,
++            input_example=input_example,
++        )
++    return path
++
++
++def load_predictor(uri: str | None = None):
++    """
++    Load a packaged model. `uri` can be a local folder or any MLflow URI
++    (runs:/<id>/model, models:/<name>@<alias>). Defaults to the local copy.
++    """
++    from config import PREDICTOR_DIR
++
++    uri = uri or PREDICTOR_DIR
++    if "://" not in uri and not os.path.exists(uri):
++        raise FileNotFoundError(f"No packaged model at '{uri}'. Run:  python model_trainer.py")
++    return mlflow.pyfunc.load_model(uri)
+diff --git a/tests/test_rul_predictor.py b/tests/test_rul_predictor.py
+new file mode 100644
+index 0000000..06fc2b6
+--- /dev/null
++++ b/tests/test_rul_predictor.py
+@@ -0,0 +1,91 @@
++import json
++import os
++
++import numpy as np
++import pandas as pd
++import pytest
++
++import data_processor
++from config import INFORMATIVE_SENSORS, PREDICTOR_DIR
++from data_processor import build_test_dataset, load_raw
++from model_trainer import load_model_and_scaler, train
++from rul_predictor import OUTPUT_COLUMNS, load_predictor, validate_input
++
++
++@pytest.fixture(scope="module")
++def trained():
++    train(n_estimators=30, learning_rate=0.1, device="cpu", log_to_mlflow=False)
++    return load_predictor()
++
++
++def test_packaged_model_matches_training_pipeline(trained):
++    """Raw cycles through the package must give the same RUL as the training code path."""
++    model, scaler = load_model_and_scaler()
++    X_test, _ = build_test_dataset(scaler)
++    expected = model.predict(X_test).clip(0)
++
++    out = trained.predict(load_raw("test"))
++    assert list(out.columns) == OUTPUT_COLUMNS
++    np.testing.assert_allclose(out["rul"].values, expected, rtol=1e-5, atol=1e-4)
++
++
++def test_one_row_per_engine_in_unit_order(trained):
++    raw = load_raw("test")
++    shuffled = raw[raw["unit"].isin([3, 1, 2])].sort_values(["unit", "cycle"], ascending=[False, True])
++    out = trained.predict(shuffled)
++    assert list(out["unit"]) == [1, 2, 3]
++    last = raw[raw["unit"].isin([1, 2, 3])].groupby("unit")["cycle"].max().values
++    assert list(out["last_cycle"]) == list(last)
++    assert (out["rul_lower"] <= out["rul"]).all() and (out["rul"] <= out["rul_upper"]).all()
++
++
++def test_extra_columns_are_ignored(trained):
++    raw = load_raw("test")
++    one = raw[raw["unit"] == 1]
++    trimmed = one[["unit", "cycle"] + INFORMATIVE_SENSORS]
++    assert trained.predict(one)["rul"].iloc[0] == pytest.approx(trained.predict(trimmed)["rul"].iloc[0])
++
++
++def test_short_history_is_flagged(trained):
++    one = load_raw("test").query("unit == 1")
++    out = trained.predict(one.tail(20))
++    assert bool(out["short_history"].iloc[0]) is True
++    assert out["history_cycles"].iloc[0] == 20
++
++
++def test_missing_sensor_is_rejected_with_a_clear_message(trained):
++    one = load_raw("test").query("unit == 1").drop(columns=["s4"])
++    with pytest.raises(Exception, match="s4"):
++        trained.predict(one)
++
++
++def test_validate_input_catches_gaps_and_nulls():
++    one = load_raw("test").query("unit == 1").reset_index(drop=True)
++    gap = one.drop(index=5)
++    assert any("consecutive" in p for p in validate_input(gap, INFORMATIVE_SENSORS))
++    nulls = one.copy()
++    nulls.loc[3, "s7"] = np.nan
++    assert any("null" in p for p in validate_input(nulls, INFORMATIVE_SENSORS))
++    assert validate_input(one, INFORMATIVE_SENSORS) == []
++
++
++def test_package_uses_its_own_feature_spec_not_current_config(trained, monkeypatch):
++    """A config change after training must not change what an existing model computes."""
++    one = load_raw("test").query("unit == 1")
++    before = trained.predict(one)["rul"].iloc[0]
++
++    monkeypatch.setattr(data_processor, "ROLLING_WINDOWS", [3])
++    monkeypatch.setattr(data_processor, "SLOPE_WINDOWS", [5])
++    after = load_predictor().predict(one)["rul"].iloc[0]
++    assert after == pytest.approx(before)
++
++    with open(os.path.join(PREDICTOR_DIR, "artifacts", "feature_spec.json")) as f:
++        spec = json.load(f)
++    assert spec["slope_windows"] == [10, 30, 50, 80]
++
++
++def test_signature_describes_raw_sensor_input(trained):
++    names = trained.metadata.get_input_schema().input_names()
++    assert names[:2] == ["unit", "cycle"]
++    assert set(INFORMATIVE_SENSORS) <= set(names)
++    assert isinstance(trained.predict(load_raw("test").query("unit == 2")), pd.DataFrame)
+diff --git a/tests/test_training_mlflow.py b/tests/test_training_mlflow.py
+index 91d777f..b726301 100644
+--- a/tests/test_training_mlflow.py
++++ b/tests/test_training_mlflow.py
+@@ -2,7 +2,7 @@ import mlflow
+ import numpy as np
+ 
+ from config import MLFLOW_EXPERIMENT, MLFLOW_TRACKING_URI
+-from data_processor import get_feature_columns
++from data_processor import load_raw
+ from model_trainer import load_model_and_scaler, train
+ 
+ 
+@@ -23,10 +23,12 @@ def test_training_run_is_logged_to_mlflow():
+     artifacts = {a.path for a in mlflow.MlflowClient().list_artifacts(run.info.run_id, "evaluation")}
+     assert {"evaluation/feature_importance.csv", "evaluation/test_predictions.csv"} <= artifacts
+ 
+-    # Logged model loads back and predicts on the full feature input
++    # Logged model is the packaged predictor: raw cycles in, one row per engine out
+     model = mlflow.pyfunc.load_model(f"runs:/{run.info.run_id}/model")
+-    n_features = len(get_feature_columns())
+-    assert model.predict(np.zeros((2, n_features))).shape == (2,)
++    raw = load_raw("test")
++    out = model.predict(raw[raw["unit"].isin([1, 2])])
++    assert list(out["unit"]) == [1, 2]
++    assert (out["rul"] >= 0).all()
+ 
+     # The joblib copy used by the Streamlit app is still written
+     xgb_model, scaler = load_model_and_scaler()
+-- 
+2.43.0
+

@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 Before first run:
   1. python download_data.py        ← get the dataset
   2. python model_trainer.py        ← train XGBoost (~30 sec on GPU)
+     or python run_pipeline.py      ← train XGBoost + LSTM and promote a champion
   3. streamlit run app.py           ← launch UI
 """
 
@@ -17,7 +18,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from config import (
-    INFORMATIVE_SENSORS, MODEL_PATH, THRESHOLD_CRITICAL, THRESHOLD_HIGH, THRESHOLD_MEDIUM,
+    INFORMATIVE_SENSORS, MODEL_PATH, PREDICTOR_DIR, THRESHOLD_CRITICAL, THRESHOLD_HIGH, THRESHOLD_MEDIUM,
     MAX_RUL, OLLAMA_MODEL,
 )
 from data_processor import load_raw, add_rul_labels, get_engine_data
@@ -53,7 +54,7 @@ def check_prerequisites():
     issues = []
     if not os.path.exists("data/train_FD001.txt"):
         issues.append("❌ Data missing — run: `python download_data.py`")
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.exists(MODEL_PATH) and not os.path.exists(PREDICTOR_DIR):
         issues.append("❌ Model missing — run: `python model_trainer.py`")
     return issues
 
@@ -100,7 +101,11 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Agent Config")
-    st.code(f"Model: {OLLAMA_MODEL}", language=None)
+    st.code(f"LLM: {OLLAMA_MODEL}", language=None)
+    from agent_graph import get_predictor
+    from rul_predictor import model_type
+    _rul_model = get_predictor()
+    st.code(f"RUL model: {model_type(_rul_model)}\n{_rul_model.source}", language=None)
 
     run_btn = st.button("▶  Run Agent Analysis", type="primary", use_container_width=True)
 
@@ -109,8 +114,8 @@ with st.sidebar:
     st.markdown("""
 | Method | RMSE (FD001) |
 |---|---|
-| XGBoost (ours) | ~13–16 |
-| LSTM | ~10–13 |
+| XGBoost (ours) | 12.6 |
+| LSTM (published) | ~10–13 |
 | SOTA ensemble | ~6–8 |
 
 Lower RMSE = better prediction (in engine cycles).
@@ -260,15 +265,13 @@ with tab2:
 
     @st.cache_data
     def predict_for_all_cycles(engine_id, split):
-        """Run XGBoost RUL prediction on all cycles of an engine for the trend chart."""
-        from data_processor import scale_features
-        from model_trainer import load_model_and_scaler
+        """Run the champion model on every cycle of an engine for the trend chart."""
+        from agent_graph import get_predictor
+        from rul_predictor import request_frame
 
         engine_df = get_engine_data(engine_id, split=split)
-        model, scaler = load_model_and_scaler()
-        X_scaled, _ = scale_features(engine_df, fit=False, scaler=scaler)
-        y_pred = model.predict(X_scaled).clip(0)
-        return engine_df["cycle"].values, y_pred, engine_df.get("rul", pd.Series([])).values
+        out = get_predictor().predict(request_frame(engine_df), params={"all_cycles": True})
+        return out["last_cycle"].values, out["rul"].values, engine_df.get("rul", pd.Series([])).values
 
     cycles, pred_rul, true_rul = predict_for_all_cycles(engine_id, split)
 

@@ -68,13 +68,19 @@ prognosticai/
 ├── download_data.py             ← fetches NASA C-MAPSS FD001
 ├── data_processor.py            ← loading, validation, RUL labelling, feature engineering
 ├── model_trainer.py             ← XGBoost training and evaluation, MLflow tracking, CLI
-├── rul_predictor.py             ← packaged MLflow model: raw sensor cycles in, RUL out
+├── lstm_model.py                ← PyTorch LSTM network and sequence windows
+├── lstm_trainer.py              ← LSTM challenger training on the same split, CLI
+├── rul_predictor.py             ← packaged MLflow models: raw sensor cycles in, RUL out
+├── registry.py                  ← model registry, champion/challenger promotion rules
+├── promote.py                   ← promotion CLI
+├── run_pipeline.py              ← whole pipeline in one command (used by CI and Kaggle)
+├── report.py                    ← model comparison report from the registry
 ├── pipelines/definitions.py     ← Dagster assets, data-quality checks, weekly schedule
 ├── knowledge_base.py            ← ATA chapter maintenance procedures (MRO-001 to MRO-006)
 ├── agent_graph.py               ← LangGraph agent (5 nodes, conditional routing)
 ├── app.py                       ← Streamlit dashboard
 ├── tests/                       ← pytest suite on synthetic C-MAPSS-format data
-├── notebooks/kaggle_train.ipynb ← GPU training run on Kaggle
+├── notebooks/kaggle_train.ipynb ← calls the scripts on a Kaggle GPU, no logic in the notebook
 ├── docs/                        ← screenshots
 └── .github/workflows/ci.yml     ← lint, tests, real-data training and RMSE gate
 ```
@@ -155,7 +161,7 @@ Training options: `--device cpu|cuda|auto`, `--register` (add the model to the M
 
 ## Experiment Tracking (MLflow)
 
-Each training run logs its parameters, metrics (validation and test RMSE, MAE, NASA score, best iteration, training time), the validation curve, feature importance, per-engine test predictions, the scaler and the model itself. `--register` adds the model to the registry as `prognosticai-rul-xgb`.
+Each training run logs its parameters, metrics (validation and test RMSE, MAE, NASA score, best iteration or epoch, training time), the validation curve, per-engine test predictions and the packaged model. Runs are tagged with `model_type` (`xgboost` or `lstm`), git SHA and runner (local, CI or Kaggle). `--register` adds the model to the registry (see below).
 
 ```bash
 python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
@@ -176,7 +182,7 @@ features itself, which meant a retrained model could be loaded next to an old sc
 from rul_predictor import load_predictor
 from data_processor import load_raw
 
-predictor = load_predictor()                     # local copy in models/rul_predictor
+predictor = load_predictor()                     # registry champion, or the local copy in models/rul_predictor
 # or: mlflow.pyfunc.load_model("runs:/<run_id>/model")
 raw = load_raw("test")
 predictor.predict(raw[raw["unit"] == 3])
@@ -186,7 +192,8 @@ predictor.predict(raw[raw["unit"] == 3])
 
 - **Input:** one row per cycle with `unit`, `cycle` and the 14 informative sensors. Extra columns are ignored.
   Missing sensors, nulls and gaps in the cycle sequence are rejected with a clear error.
-- **Output:** one row per engine, predicted at its last observed cycle.
+- **Output:** one row per engine, predicted at its last observed cycle. Pass `params={"all_cycles": True}`
+  for one row per cycle (used by the dashboard's trend chart).
 - **Feature spec travels with the model.** Changing windows or sensors in `config.py` later does not change
   what an already trained model computes. A test checks this.
 - **Short histories are flagged.** The longest slope window is 80 cycles. Engines with less history still get a
@@ -196,13 +203,60 @@ predictor.predict(raw[raw["unit"] == 3])
 
 ---
 
+## LSTM Challenger and Model Registry
+
+**Why train an LSTM at all?** XGBoost works from 183 hand-built features. The LSTM (`lstm_model.py`) only sees
+the last 30 cycles of the 14 sensors and learns the pattern itself. If it wins, the feature engineering was
+leaving signal on the table. If it loses, that is measured evidence for keeping the interpretable model.
+
+Both models are trained on the **same engine-level split and seed** (a test checks the validation engines
+match), packaged with the same contract, and logged to the same MLflow experiment.
+
+**Registry.** There is one registered model, `prognosticai-rul`, for every architecture:
+
+- each `--register` run adds a version tagged with its metrics and moves the alias `challenger-<model_type>`
+- `promote.py` moves the `champion` alias; the agent and dashboard load `models:/prognosticai-rul@champion`
+  (falling back to the local XGBoost package when no registry is available)
+
+**Promotion rules** (`registry.py`):
+
+1. A version must pass its test-RMSE gate (15 for XGBoost, 18 for the LSTM). The test set is a floor here, not a ranking.
+2. Candidates are ranked on **validation RMSE**. Picking the model on test RMSE would leak the test set into model selection.
+3. A challenger has to beat the champion by at least 0.5 cycles, so run-to-run noise does not flip the champion.
+
+```bash
+python promote.py --dry-run     # see the decision without changing anything
+python report.py                # reports/model_comparison.md + validation_curves.png
+```
+
+**Result on FD001 (CPU run):**
+
+| model | val RMSE | test RMSE | NASA score | role |
+|---|---|---|---|---|
+| XGBoost (183 features) | 8.48 | 12.56 | 242.6 | champion |
+| LSTM (2 × 64, 30-cycle window) | 12.05 | 14.75 | 420.7 | challenger, not promoted |
+
+The XGBoost validation RMSE is optimistic: its settings were tuned with cross-validation on these training
+engines, and both models early-stop on the validation engines. The test set agrees on the order, though,
+and the gap (2.2 cycles) is well beyond the promotion margin. The LSTM here is untuned, so this result says
+"engineered trend features beat a plain LSTM on FD001", not "XGBoost beats every sequence model".
+
+---
+
 ## Pipeline Orchestration (Dagster)
 
 ```
-cmapss_raw_files ──(raw_data_is_valid, blocking)──▶ rul_model ──(rmse_within_gate)
+cmapss_raw_files ──(raw_data_is_valid, blocking)──┬──▶ xgboost_rul_model ──(xgboost_rmse_within_gate)──┐
+                                                  └──▶ lstm_rul_model ─────(lstm_rmse_within_gate)─────┴──▶ champion_model
 ```
 
-The data-quality check (schema, nulls, cycle continuity, label count) blocks training if the raw data is bad. The RMSE gate fails if test RMSE goes above 15 cycles. The whole graph is scheduled to retrain weekly (Monday 03:00, Europe/Stockholm).
+The data-quality check (schema, nulls, cycle continuity, label count) blocks training if the raw data is bad. Each model has an RMSE gate. `champion_model` runs the promotion rules above. The whole graph is scheduled to retrain weekly (Monday 03:00, Europe/Stockholm).
+
+To run everything once from the command line, without the Dagster UI:
+
+```bash
+python run_pipeline.py --device cpu       # or cuda / auto
+```
 
 ```bash
 pip install -r requirements-dev.txt
@@ -223,14 +277,14 @@ dagster asset materialize -m pipelines.definitions --select '*'
 
 GitHub Actions runs on every push to `main` and on every pull request:
 
-1. `ruff`, Dagster definition validation and `pytest`
-2. Training on the real FD001 data (CPU). The build fails if test RMSE goes above 15. The MLflow run is uploaded as a build artifact and the metrics appear in the job summary.
+1. `ruff`, Dagster definition validation and `pytest` (including a 2-epoch LSTM and the promotion rules)
+2. `run_pipeline.py` on the real FD001 data (CPU PyTorch, 15 LSTM epochs). The build fails if any gate fails. The comparison report appears in the job summary and the MLflow store is uploaded as a build artifact.
 
 ---
 
 ## GPU Training on Kaggle
 
-`notebooks/kaggle_train.ipynb` clones the repo, runs the tests, then runs the Dagster pipeline on a Kaggle GPU and shows the MLflow runs. In the notebook settings, set the accelerator to GPU and turn Internet on before running.
+`notebooks/kaggle_train.ipynb` contains no training code. It clones the repo, installs MLflow and Dagster, runs `pytest`, then `python run_pipeline.py --device cuda`, and prints `reports/model_comparison.md`. Set `BRANCH` in the second cell to test a feature branch before merging. In the notebook settings, set the accelerator to GPU and turn Internet on.
 
 ---
 

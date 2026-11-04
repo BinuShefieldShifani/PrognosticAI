@@ -3,14 +3,19 @@ Dagster pipeline for PrognosticAI
 =================================
 Asset graph (run with `dagster dev` from the repo root):
 
-    cmapss_raw_files ──(check: raw_data_is_valid, blocking)──▶ rul_model
-                                                                  │
-                                                     (check: rmse_within_gate)
+    cmapss_raw_files ──(check: raw_data_is_valid, blocking)──┬──▶ xgboost_rul_model ──┐
+                                                              │   (check: xgboost_rmse_within_gate)
+                                                              └──▶ lstm_rul_model ─────┤
+                                                                  (check: lstm_rmse_within_gate)
+                                                                                       ▼
+                                                                                champion_model
 
-- cmapss_raw_files : downloads C-MAPSS FD001 if missing, records row/engine counts
-- raw_data_is_valid: blocking data-quality check, stops training on bad data
-- rul_model        : trains XGBoost, logs the run to MLflow, returns the metrics
-- rmse_within_gate: fails if test RMSE regresses past the configured gate
+- cmapss_raw_files  : downloads C-MAPSS FD001 if missing, records row/engine counts
+- raw_data_is_valid : blocking data-quality check, stops training on bad data
+- xgboost_rul_model : trains XGBoost, logs to MLflow, registers it as challenger-xgboost
+- lstm_rul_model    : trains the PyTorch LSTM on the same split, registers it as challenger-lstm
+- champion_model    : compares challengers with the champion on validation RMSE and
+                      moves the champion alias if one is clearly better (registry.py)
 
 A weekly schedule re-runs the whole graph (Monday 03:00, Stockholm time).
 """
@@ -33,9 +38,13 @@ from dagster import (
 )
 
 import download_data
-from config import COL_NAMES, DATA_DIR, MLFLOW_EXPERIMENT, MLFLOW_TRACKING_URI, RMSE_GATE
+from config import (
+    COL_NAMES, DATA_DIR, LSTM_RMSE_GATE, MLFLOW_EXPERIMENT, MLFLOW_TRACKING_URI,
+    PROMOTION_MIN_GAIN, RMSE_GATE,
+)
 from data_processor import load_raw, validate_raw
 from model_trainer import train
+from registry import format_decision, promote
 
 RAW_FILES = ["train_FD001.txt", "test_FD001.txt", "RUL_FD001.txt"]
 
@@ -78,7 +87,16 @@ def raw_data_is_valid() -> AssetCheckResult:
     )
 
 
-class TrainConfig(Config):
+def _metrics_metadata(metrics: dict) -> dict:
+    keep = ("test_rmse", "val_rmse", "nasa_score", "test_mae")
+    meta = {k: round(metrics[k], 2) for k in keep}
+    meta.update({"mlflow_run_id": metrics.get("mlflow_run_id", "-"),
+                 "mlflow_tracking_uri": MLFLOW_TRACKING_URI,
+                 "mlflow_experiment": MLFLOW_EXPERIMENT})
+    return meta
+
+
+class XGBoostConfig(Config):
     n_estimators: int | None = None
     learning_rate: float | None = None
     device: str | None = None          # auto / cuda / cpu
@@ -87,38 +105,89 @@ class TrainConfig(Config):
 
 
 @asset(group_name="prognosticai", deps=[cmapss_raw_files],
-       description="XGBoost RUL model, tracked in MLflow")
-def rul_model(context: AssetExecutionContext, config: TrainConfig) -> dict:
+       description="XGBoost RUL model, tracked in MLflow, registered as challenger-xgboost")
+def xgboost_rul_model(context: AssetExecutionContext, config: XGBoostConfig) -> dict:
     metrics = train(
         n_estimators=config.n_estimators,
         learning_rate=config.learning_rate,
         device=config.device,
         log_to_mlflow=True,
         register_model=config.register_model,
-        run_name=f"dagster-{context.run_id[:8]}",
+        run_name=f"dagster-xgb-{context.run_id[:8]}",
+        rmse_gate=config.rmse_gate,
     )
     metrics["rmse_gate"] = config.rmse_gate
-    context.add_output_metadata({
-        "test_rmse": round(metrics["test_rmse"], 2),
-        "val_rmse": round(metrics["val_rmse"], 2),
-        "nasa_score": round(metrics["nasa_score"], 1),
-        "best_iteration": metrics["best_iteration"],
-        "mlflow_run_id": metrics["mlflow_run_id"],
-        "mlflow_tracking_uri": MLFLOW_TRACKING_URI,
-        "mlflow_experiment": MLFLOW_EXPERIMENT,
-    })
+    context.add_output_metadata({**_metrics_metadata(metrics), "best_iteration": metrics["best_iteration"]})
     return metrics
 
 
-@asset_check(asset=rul_model, description="Test-set RMSE must stay under the gate")
-def rmse_within_gate(rul_model: dict) -> AssetCheckResult:
-    rmse, gate = rul_model["test_rmse"], rul_model["rmse_gate"]
+class LSTMConfig(Config):
+    epochs: int | None = None
+    device: str | None = None          # auto / cuda / cpu / mps
+    register_model: bool = True
+    rmse_gate: float = LSTM_RMSE_GATE
+    hidden_size: int | None = None     # smaller values only for quick tests
+
+
+@asset(group_name="prognosticai", deps=[cmapss_raw_files],
+       description="PyTorch LSTM RUL model on the same split, registered as challenger-lstm")
+def lstm_rul_model(context: AssetExecutionContext, config: LSTMConfig) -> dict:
+    from lstm_trainer import train_lstm
+
+    metrics = train_lstm(
+        epochs=config.epochs,
+        device=config.device,
+        log_to_mlflow=True,
+        register_model=config.register_model,
+        run_name=f"dagster-lstm-{context.run_id[:8]}",
+        rmse_gate=config.rmse_gate,
+        hidden_size=config.hidden_size,
+    )
+    metrics["rmse_gate"] = config.rmse_gate
+    context.add_output_metadata({**_metrics_metadata(metrics), "best_epoch": metrics["best_epoch"]})
+    return metrics
+
+
+def _gate_result(metrics: dict) -> AssetCheckResult:
+    rmse, gate = metrics["test_rmse"], metrics["rmse_gate"]
     return AssetCheckResult(
         passed=rmse <= gate,
         severity=AssetCheckSeverity.ERROR,
         metadata={"test_rmse": round(rmse, 2), "gate": gate},
     )
 
+
+@asset_check(asset=xgboost_rul_model, description="XGBoost test RMSE must stay under its gate")
+def xgboost_rmse_within_gate(xgboost_rul_model: dict) -> AssetCheckResult:
+    return _gate_result(xgboost_rul_model)
+
+
+@asset_check(asset=lstm_rul_model, description="LSTM test RMSE must stay under its gate")
+def lstm_rmse_within_gate(lstm_rul_model: dict) -> AssetCheckResult:
+    return _gate_result(lstm_rul_model)
+
+
+class PromotionConfig(Config):
+    min_gain: float = PROMOTION_MIN_GAIN
+    dry_run: bool = False
+
+
+@asset(group_name="prognosticai", deps=[xgboost_rul_model, lstm_rul_model],
+       description="Champion/challenger decision on validation RMSE; moves the champion alias")
+def champion_model(context: AssetExecutionContext, config: PromotionConfig) -> dict:
+    decision = promote(min_gain=config.min_gain, dry_run=config.dry_run)
+    after = decision["champion_after"] or {}
+    context.add_output_metadata({
+        "promoted": decision["promoted"],
+        "reason": decision["reason"],
+        "champion": f"{after.get('model_type', '-')} v{after.get('version', '-')}",
+        "decision": MetadataValue.md(format_decision(decision)),
+    })
+    return decision
+
+
+ALL_ASSETS = [cmapss_raw_files, xgboost_rul_model, lstm_rul_model, champion_model]
+ALL_CHECKS = [raw_data_is_valid, xgboost_rmse_within_gate, lstm_rmse_within_gate]
 
 retrain_job = define_asset_job("retrain_rul_model", selection=AssetSelection.all())
 
@@ -129,8 +198,8 @@ weekly_retrain = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[cmapss_raw_files, rul_model],
-    asset_checks=[raw_data_is_valid, rmse_within_gate],
+    assets=ALL_ASSETS,
+    asset_checks=ALL_CHECKS,
     jobs=[retrain_job],
     schedules=[weekly_retrain],
 )

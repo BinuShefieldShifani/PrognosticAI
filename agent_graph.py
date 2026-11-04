@@ -20,7 +20,7 @@ Four nodes, one conditional edge:
 
 Node responsibilities:
   sensor_analyst     — pure Python / statistics, no LLM
-  rul_estimator      — XGBoost model call, no LLM
+  rul_estimator      — registry champion model (XGBoost or LSTM), no LLM
   failure_diagnosis  — LLM: diagnose failure mode from sensor pattern
   workorder_generator— LLM: generate structured maintenance work order
   routine_advisory   — LLM: generate monitoring advisory (healthy engine)
@@ -39,8 +39,8 @@ from config import (
     INFORMATIVE_SENSORS,
     THRESHOLD_CRITICAL, THRESHOLD_HIGH, THRESHOLD_MEDIUM,
 )
-from model_trainer import load_model_and_scaler, predict_rul
-from data_processor import get_engine_data, scale_features
+from data_processor import get_engine_data
+from rul_predictor import load_predictor, model_type, request_frame
 from knowledge_base import retrieve_procedures
 
 
@@ -179,27 +179,38 @@ def sensor_analyst_node(state: AgentState) -> AgentState:
     }
 
 
-# ── Node 2: RUL Estimator (XGBoost — no LLM) ─────────────────────────────
+# ── Node 2: RUL Estimator (champion model — no LLM) ──────────────────────
+
+_PREDICTOR = None
+
+
+def get_predictor():
+    """Load the registry champion once (falls back to the local XGBoost package)."""
+    global _PREDICTOR
+    if _PREDICTOR is None:
+        _PREDICTOR = load_predictor()
+    return _PREDICTOR
+
 
 def rul_estimator_node(state: AgentState) -> AgentState:
     """
-    Loads the pre-trained XGBoost model and predicts Remaining Useful Life.
+    Predicts Remaining Useful Life with the current champion model.
+    The packaged model takes raw sensor cycles, so this node does no feature work.
     """
     log = state["reasoning_log"]
     engine_id = state["engine_id"]
     split = state.get("split", "train")
 
-    log.append("[RUL Estimator] Loading XGBoost model...")
-    model, scaler = load_model_and_scaler()
+    predictor = get_predictor()
+    log.append(f"[RUL Estimator] Using {model_type(predictor)} model from {predictor.source}")
 
     engine_df = get_engine_data(engine_id, split=split)
-
-    # Use last observed cycle for prediction
-    X_scaled, _ = scale_features(engine_df, fit=False, scaler=scaler)
-    last_scaled = X_scaled[-1:]
-
-    rul, lower, upper = predict_rul(last_scaled, model)
+    pred = predictor.predict(request_frame(engine_df)).iloc[0]
+    rul, lower, upper = float(pred["rul"]), float(pred["rul_lower"]), float(pred["rul_upper"])
     log.append(f"[RUL Estimator] Predicted RUL: {rul:.1f} cycles  (heuristic ±15% band: [{lower:.1f}, {upper:.1f}])")
+    if pred["short_history"]:
+        log.append(f"[RUL Estimator] Only {int(pred['history_cycles'])} cycles of history: "
+                   "less than the model was trained on, treat the estimate with extra caution")
 
     # Assign priority
     if rul < THRESHOLD_CRITICAL:

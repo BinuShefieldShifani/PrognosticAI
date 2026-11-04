@@ -15,7 +15,7 @@ from rul_predictor import OUTPUT_COLUMNS, load_predictor, validate_input
 @pytest.fixture(scope="module")
 def trained():
     train(n_estimators=30, learning_rate=0.1, device="cpu", log_to_mlflow=False)
-    return load_predictor()
+    return load_predictor(PREDICTOR_DIR)
 
 
 def test_packaged_model_matches_training_pipeline(trained):
@@ -76,7 +76,7 @@ def test_package_uses_its_own_feature_spec_not_current_config(trained, monkeypat
 
     monkeypatch.setattr(data_processor, "ROLLING_WINDOWS", [3])
     monkeypatch.setattr(data_processor, "SLOPE_WINDOWS", [5])
-    after = load_predictor().predict(one)["rul"].iloc[0]
+    after = load_predictor(PREDICTOR_DIR).predict(one)["rul"].iloc[0]
     assert after == pytest.approx(before)
 
     with open(os.path.join(PREDICTOR_DIR, "artifacts", "feature_spec.json")) as f:
@@ -89,3 +89,16 @@ def test_signature_describes_raw_sensor_input(trained):
     assert names[:2] == ["unit", "cycle"]
     assert set(INFORMATIVE_SENSORS) <= set(names)
     assert isinstance(trained.predict(load_raw("test").query("unit == 2")), pd.DataFrame)
+
+
+def test_all_cycles_returns_one_row_per_cycle_and_ends_on_the_default(trained):
+    one = load_raw("test").query("unit == 4")
+    every = trained.predict(one, params={"all_cycles": True})
+    assert len(every) == len(one)
+    assert list(every["history_cycles"]) == list(range(1, len(one) + 1))
+    assert every["rul"].iloc[-1] == pytest.approx(trained.predict(one)["rul"].iloc[0])
+
+
+def test_registry_champion_falls_back_to_local_package_when_missing(trained):
+    predictor = load_predictor("models:/does-not-exist@champion")
+    assert predictor.source == PREDICTOR_DIR
