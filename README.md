@@ -3,9 +3,11 @@
 [![CI](https://github.com/BinuShefieldShifani/PrognosticAI/actions/workflows/ci.yml/badge.svg)](https://github.com/BinuShefieldShifani/PrognosticAI/actions/workflows/ci.yml)
 
 **Predictive maintenance pipeline for turbofan engines, from raw sensor data to maintenance work orders.**
-Built on NASA C-MAPSS FD001 · XGBoost (GPU/CPU) · MLflow · Dagster · GitHub Actions · LangGraph · Local LLM (Ollama)
+Built on NASA C-MAPSS FD001 · XGBoost (GPU/CPU) · MLflow · Dagster · GitHub Actions · LangGraph · Local LLM (Ollama) · Elasticsearch (BM25 + kNN)
 
 > **Result:** test RMSE 12.6 cycles (MAE 9.4) and NASA score 243 on the FD001 test set. Every training run is tracked in MLflow, the pipeline runs as Dagster assets with data-quality checks, and CI fails the build if accuracy regresses.
+>
+> **Retrieval:** hybrid Elasticsearch search (BM25 + dense kNN, fused with RRF) finds the right maintenance procedure in the top 2 for 98% of 48 labelled queries, up from 81% with the original keyword matcher (MRR 0.809 to 0.955).
 
 ---
 
@@ -77,6 +79,11 @@ prognosticai/
 ├── report.py                    ← model comparison report from the registry
 ├── pipelines/definitions.py     ← Dagster assets, data-quality checks, weekly schedule
 ├── knowledge_base.py            ← ATA chapter maintenance procedures (MRO-001 to MRO-006)
+├── procedure_search.py          ← picks the retriever (keyword default, Elasticsearch optional)
+├── es_retriever.py              ← Elasticsearch BM25, dense kNN and hybrid (RRF) search
+├── embeddings.py                ← all-MiniLM-L6-v2 on ONNX Runtime (no PyTorch)
+├── retrieval_eval.py            ← retrieval metrics: Hit@k, MRR, nDCG, by query type
+├── eval/procedure_queries.jsonl ← 48 labelled retrieval queries
 ├── agent_graph.py               ← LangGraph agent (5 nodes, conditional routing)
 ├── app.py                       ← Streamlit dashboard
 ├── tests/                       ← pytest suite on synthetic C-MAPSS-format data
@@ -273,12 +280,13 @@ dagster asset materialize -m pipelines.definitions --select '*'
 
 ## Testing and CI
 
-`pytest` runs the suite on small synthetic files in C-MAPSS format, so it is fast and works offline. It covers RUL labelling, feature engineering, a check that features never use future cycles, data validation, the engine-level split, the NASA score, MLflow logging and model reload, and the full Dagster graph including a failing gate.
+`pytest` runs the suite on small synthetic files in C-MAPSS format, so it is fast and works offline. It covers RUL labelling, feature engineering, a check that features never use future cycles, data validation, the engine-level split, the NASA score, MLflow logging and model reload, and the full Dagster graph including a failing gate. The Elasticsearch retrieval tests use a fake Elasticsearch here; the live ones run in their own CI job.
 
 GitHub Actions runs on every push to `main` and on every pull request:
 
 1. `ruff`, Dagster definition validation and `pytest` (including a 2-epoch LSTM and the promotion rules)
 2. `run_pipeline.py` on the real FD001 data (CPU PyTorch, 15 LSTM epochs). The build fails if any gate fails. The comparison report appears in the job summary and the MLflow store is uploaded as a build artifact.
+3. Procedure retrieval eval against a real Elasticsearch 8.15 service container. The build fails if hybrid retrieval scores below the keyword baseline.
 
 ---
 
@@ -298,6 +306,71 @@ docker exec -it ollama ollama pull gpt-oss:20b
 ```
 
 The model name must match `OLLAMA_MODEL` in `config.py`.
+
+---
+
+## Maintenance Procedure Retrieval (Elasticsearch)
+
+When an engine is degraded, the agent attaches the two most relevant maintenance procedures to the work order. The original retriever in `knowledge_base.py` counts shared words. It works when the LLM uses the same words as the procedure, and it fails quietly when it doesn't: with no word overlap every procedure scores zero, and it returns the HPC and HPT procedures simply because they come first in the list. That happens for one of the agent's own outputs, "General Engine Degradation".
+
+The add-on indexes the procedures in Elasticsearch and ranks them three ways:
+
+| Mode | How it ranks |
+|---|---|
+| `bm25` | `multi_match` over title, failure modes, ATA chapter, steps and parts, English analyzer |
+| `dense` | kNN on a `dense_vector` field (all-MiniLM-L6-v2, 384 dims, cosine, HNSW) |
+| `hybrid` | both lists fused with Reciprocal Rank Fusion (k = 60) |
+
+The emergency rule is unchanged: below 15 cycles of RUL the shutdown procedure (MRO-006) goes first, by rule, not by ranking. It is filtered out of every search.
+
+### Results
+
+48 queries, written and labelled before any retriever was run (`eval/procedure_queries.jsonl`). Each has one correct procedure, and some have an acceptable second one for nDCG. Query types: the exact strings the diagnosis node produces, paraphrases, sensor-trend descriptions, procedure requests, and ATA/AMM references or part names.
+
+| Retriever | Hit@1 | Hit@2 | MRR | nDCG@3 |
+|---|---|---|---|---|
+| keyword (original) | 0.71 | 0.81 | 0.809 | 0.808 |
+| bm25 | 0.92 | 0.98 | 0.953 | 0.966 |
+| dense | 0.90 | 0.94 | 0.933 | 0.932 |
+| **hybrid** | **0.92** | **0.98** | **0.955** | **0.965** |
+
+MRR by query type:
+
+| Retriever | agent output (10) | paraphrase (14) | symptom (6) | procedure (10) | reference (8) |
+|---|---|---|---|---|---|
+| keyword | 0.925 | 0.780 | 1.000 | 0.665 | 0.754 |
+| bm25 | 1.000 | 0.875 | 0.917 | 1.000 | 1.000 |
+| dense | 0.950 | 0.964 | 1.000 | 1.000 | 0.723 |
+| hybrid | 0.950 | 0.952 | 1.000 | 1.000 | 0.875 |
+
+**What the numbers say.** BM25 and dense fail on different queries. Dense search can't match codes: it misses "ATA 72-30" and "AMM 72-10-05" because to an embedding model they are just numbers. BM25 misses paraphrases with no shared words, like "bird strike damaged the front of the engine". Hybrid is never the worst on any query type, which is why it is the default mode. On a corpus this small BM25 alone is almost as good overall, so the honest claim is robustness, not a big jump over BM25.
+
+The one query hybrid still misses in the top 2 is "engine is shaking more than usual" (vibration, MRO-004): BM25 matches "engine" to the shop-visit procedure and pulls it up.
+
+No settings were tuned on these queries. Field boosts, RRF k and the embedding model were fixed before the first run.
+
+### Running it
+
+```bash
+pip install -r requirements-search.txt          # onnxruntime + tokenizers, only for dense/hybrid
+python embeddings.py --download                 # all-MiniLM-L6-v2 ONNX, about 90 MB, once
+
+docker run -d -p 9200:9200 -e discovery.type=single-node -e xpack.security.enabled=false \
+  docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+
+python retrieval_eval.py --es-url http://localhost:9200     # prints both tables and every miss
+
+# Use it in the agent (default stays keyword)
+export PROGNOSTIC_RETRIEVER=elasticsearch
+export PROGNOSTIC_ES_MODE=hybrid                # or bm25 / dense
+streamlit run app.py
+```
+
+The index is created on first use and rebuilt automatically when a procedure or the embedding model changes (a fingerprint is stored in the index mapping). If Elasticsearch is down or times out, the agent falls back to keyword retrieval and says so in the reasoning log. For Elastic Cloud, set `PROGNOSTIC_ES_URL` and `PROGNOSTIC_ES_API_KEY`.
+
+### CI
+
+A third CI job starts Elasticsearch 8.15 as a service container, runs the live tests, then runs the eval and posts the tables in the job summary. It fails if hybrid MRR drops below the keyword baseline. The unit tests for this part use a fake Elasticsearch, so the main test job still runs offline.
 
 ---
 
@@ -323,6 +396,7 @@ The model name must match `OLLAMA_MODEL` in `config.py`.
 - Simulated data, not real engine telemetry.
 - The ±15% band shown around predictions is a fixed heuristic, not a calibrated uncertainty estimate.
 - The maintenance knowledge base is illustrative, and the LLM-generated work orders have not been reviewed by maintenance engineers.
+- The retrieval eval covers six procedures and 48 queries written by me. It shows how the retrievers behave and fail, but a real ATA manual with thousands of task cards is a different scale, where dense search and HNSW settings would matter more.
 
 ---
 

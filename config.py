@@ -113,3 +113,21 @@ THRESHOLD_MEDIUM   = 100   # cycles — schedule next maintenance window
 # Our target with good features:    RMSE < 16  → "good"
 #                                   RMSE < 13  → "excellent"
 RMSE_TARGET = 16.0
+
+# ── Maintenance procedure retrieval ───────────────────────────────────────
+# "keyword" is the original retriever in knowledge_base.py and stays the default.
+# "elasticsearch" uses BM25, dense kNN or both (hybrid, fused with RRF). If
+# Elasticsearch cannot be reached, the agent falls back to keyword retrieval.
+RETRIEVER = os.getenv("PROGNOSTIC_RETRIEVER", "keyword")          # keyword | elasticsearch
+ES_URL = os.getenv("PROGNOSTIC_ES_URL", "http://localhost:9200")
+ES_API_KEY = os.getenv("PROGNOSTIC_ES_API_KEY")                   # None = no auth (local dev)
+ES_INDEX = os.getenv("PROGNOSTIC_ES_INDEX", "prognosticai-procedures")
+ES_SEARCH_MODE = os.getenv("PROGNOSTIC_ES_MODE", "hybrid")        # bm25 | dense | hybrid
+ES_TIMEOUT_S = float(os.getenv("PROGNOSTIC_ES_TIMEOUT", "3"))
+RRF_K = 60                                                        # standard RRF constant
+
+# Dense embeddings: all-MiniLM-L6-v2 on ONNX Runtime (no PyTorch needed)
+EMBED_MODEL_REPO = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_MODEL_DIR = os.getenv(
+    "PROGNOSTIC_EMBED_MODEL_DIR", os.path.join(MODEL_DIR, "embeddings", "all-MiniLM-L6-v2")
+)

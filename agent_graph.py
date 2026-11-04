@@ -41,7 +41,7 @@ from config import (
 )
 from data_processor import get_engine_data
 from rul_predictor import load_predictor, model_type, request_frame
-from knowledge_base import retrieve_procedures
+from procedure_search import search_procedures
 
 
 # ── Agent State ───────────────────────────────────────────────────────────
@@ -317,9 +317,14 @@ Respond with a JSON object only — no other text:
         log.append(f"[Failure Diagnosis] Reasoning: {reasoning}")
 
     # Retrieve matching maintenance procedures
-    procedures = retrieve_procedures(failure_mode, rul)
+    search = search_procedures(failure_mode, rul)
+    procedures = search.procedures
     log.append(f"[Failure Diagnosis] Retrieved {len(procedures)} matching maintenance procedures: "
                 f"{', '.join(p.id for p in procedures)}")
+    if search.backend != "keyword":
+        log.append(f"[Failure Diagnosis] Retriever: {search.backend}")
+    if search.note:
+        log.append(f"[Failure Diagnosis] {search.note}")
 
     return {
         **state,

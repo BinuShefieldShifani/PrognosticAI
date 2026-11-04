@@ -18,3 +18,5 @@ mlflow-run.zip
 
 # patch files passed around between branches
 *.patch
+retrieval_metrics.md
+retrieval_results.json
