@@ -20,3 +20,4 @@ mlflow-run.zip
 *.patch
 retrieval_metrics.md
 retrieval_results.json
+serving/
