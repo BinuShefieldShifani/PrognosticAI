@@ -87,3 +87,69 @@ jobs:
             mlflow-run.zip
             reports/
           retention-days: 14
+
+  retrieval-eval:
+    name: Procedure retrieval eval on Elasticsearch
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health?wait_for_status=yellow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PROGNOSTIC_TEST_ES_URL: http://localhost:9200
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-search.txt
+
+      # Retrieval needs no PyTorch, XGBoost or MLflow, so install only what it imports
+      - name: Install dependencies
+        run: pip install -r requirements-search.txt numpy requests pytest
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: models/embeddings
+          key: minilm-l6-v2-onnx-${{ hashFiles('embeddings.py') }}
+
+      - name: Download and check embedding model
+        run: python embeddings.py --download
+
+      - name: Live Elasticsearch tests
+        run: pytest tests/test_es_integration.py -v
+
+      - name: Retrieval eval (keyword vs BM25 vs dense vs hybrid) + gate
+        run: |
+          python retrieval_eval.py --es-url http://localhost:9200 \
+            --out retrieval_metrics.md --json-out retrieval_results.json --gate
+
+      - name: Show metrics
+        if: always()
+        run: |
+          echo "### Procedure retrieval (48 labelled queries)" >> "$GITHUB_STEP_SUMMARY"
+          cat retrieval_metrics.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-eval-${{ github.sha }}
+          path: |
+            retrieval_metrics.md
+            retrieval_results.json
+          retention-days: 14

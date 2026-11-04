@@ -1,0 +1,4 @@
+# Optional: Elasticsearch dense/hybrid retrieval (PROGNOSTIC_RETRIEVER=elasticsearch).
+# BM25-only mode needs nothing beyond requirements.txt.
+onnxruntime>=1.17
+tokenizers>=0.15
