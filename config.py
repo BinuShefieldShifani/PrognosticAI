@@ -44,7 +44,7 @@ ROLLING_WINDOWS = [5, 10, 20, 30]   # cycles — rolling mean/std: short to long
 # Long windows measure how fast a sensor is drifting, which is what separates an
 # engine that is just starting to degrade from one that is close to failure.
 SLOPE_WINDOWS = [10, 30, 50, 80]
-SEQUENCE_LENGTH = 30                # look-back window for feature computation
+SEQUENCE_LENGTH = 30                # LSTM look-back window (cycles)
 
 # ── Model ─────────────────────────────────────────────────────────────────
 MODEL_DIR = os.getenv("PROGNOSTIC_MODEL_DIR", "models")
@@ -57,6 +57,16 @@ PREDICTOR_DIR = os.path.join(MODEL_DIR, "rul_predictor")
 # Feature engineering needs this much history to match training exactly
 # (longest slope window). Shorter histories still predict, but are flagged.
 MIN_HISTORY_CYCLES = 80
+
+# ── LSTM challenger (PyTorch) ─────────────────────────────────────────────
+LSTM_PREDICTOR_DIR = os.path.join(MODEL_DIR, "lstm_predictor")
+LSTM_HIDDEN = 64
+LSTM_LAYERS = 2
+LSTM_DROPOUT = 0.2
+LSTM_EPOCHS = int(os.getenv("PROGNOSTIC_LSTM_EPOCHS", "100"))
+LSTM_BATCH_SIZE = 256
+LSTM_LEARNING_RATE = 1e-3
+LSTM_PATIENCE = 12                  # epochs without val improvement before stopping
 
 # "auto" picks cuda when an NVIDIA GPU is visible, otherwise cpu.
 XGB_DEVICE = os.getenv("PROGNOSTIC_DEVICE", "auto")
@@ -73,10 +83,22 @@ RANDOM_SEED = 42
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
 MLFLOW_EXPERIMENT = os.getenv("MLFLOW_EXPERIMENT_NAME", "prognosticai-fd001")
 MLFLOW_ARTIFACT_LOCATION = os.getenv("MLFLOW_ARTIFACT_LOCATION")  # None = MLflow default
-MLFLOW_REGISTERED_MODEL = "prognosticai-rul-xgb"
+# One registered model for every architecture. Versions carry a model_type tag,
+# the newest run of each architecture gets the alias challenger-<type>, and
+# promote.py moves the champion alias. Apps and the agent load the champion.
+MLFLOW_REGISTERED_MODEL = "prognosticai-rul"
+CHAMPION_ALIAS = "champion"
+CHALLENGER_ALIAS_PREFIX = "challenger-"
+PREDICTOR_URI = os.getenv("PROGNOSTIC_MODEL_URI", f"models:/{MLFLOW_REGISTERED_MODEL}@{CHAMPION_ALIAS}")
+
+# Promotion is decided on VALIDATION RMSE (held-out training engines), never on
+# the test set. A challenger must beat the champion by at least this many cycles,
+# so noise between runs does not flip the champion back and forth.
+PROMOTION_MIN_GAIN = float(os.getenv("PROGNOSTIC_PROMOTION_MIN_GAIN", "0.5"))
 
 # Quality gate used by CI and the Dagster asset check (test-set RMSE, cycles)
 RMSE_GATE = float(os.getenv("PROGNOSTIC_RMSE_GATE", "15.0"))
+LSTM_RMSE_GATE = float(os.getenv("PROGNOSTIC_LSTM_RMSE_GATE", "18.0"))
 
 # ── Alert Thresholds ──────────────────────────────────────────────────────
 THRESHOLD_CRITICAL = 30    # cycles — ground immediately

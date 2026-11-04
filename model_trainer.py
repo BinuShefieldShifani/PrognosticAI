@@ -1,6 +1,9 @@
 """
-model_trainer.py — XGBoost RUL Predictor (v6)
+model_trainer.py — XGBoost RUL Predictor (v7)
 ==============================================
+Changes from v6:
+  - --register adds a version to the shared `prognosticai-rul` registered model
+    and makes it the xgboost challenger; promote.py decides the champion
 Changes from v5:
   - The logged MLflow model is now a packaged pyfunc (rul_predictor.py):
     raw sensor cycles in, RUL out, with the feature spec and scaler bundled.
@@ -36,14 +39,14 @@ from sklearn.model_selection import GroupShuffleSplit
 
 from config import (
     DATASET, LEARNING_RATE, MAX_RUL, MLFLOW_ARTIFACT_LOCATION,
-    MLFLOW_EXPERIMENT, MLFLOW_REGISTERED_MODEL, MLFLOW_TRACKING_URI,
+    MLFLOW_EXPERIMENT, MLFLOW_TRACKING_URI,
     INFORMATIVE_SENSORS, MODEL_PATH, N_ESTIMATORS, PREDICTOR_DIR, RANDOM_SEED, RMSE_GATE, RMSE_TARGET,
     ROLLING_WINDOWS, SCALER_PATH, SLOPE_WINDOWS, VAL_FRACTION, XGB_DEVICE,
 )
 from data_processor import (
     build_test_dataset, build_train_dataset, feature_spec, get_feature_columns, load_raw,
 )
-from rul_predictor import heuristic_band, log_predictor, save_predictor
+from rul_predictor import heuristic_band, log_package, save_package
 
 
 def resolve_device(device: str | None = None) -> str:
@@ -112,14 +115,15 @@ def train(n_estimators: int | None = None,
           device: str | None = None,
           log_to_mlflow: bool = True,
           register_model: bool = False,
-          run_name: str | None = None) -> dict:
+          run_name: str | None = None,
+          rmse_gate: float = RMSE_GATE) -> dict:
     """Train, evaluate on the 100 test engines, and (optionally) log to MLflow."""
     n_estimators = n_estimators or N_ESTIMATORS
     learning_rate = learning_rate or LEARNING_RATE
     device = resolve_device(device)
 
     print("=" * 58)
-    print("  PrognosticAI — XGBoost RUL Training (v5)")
+    print("  PrognosticAI — XGBoost RUL Training (v7)")
     print(f"  Dataset: NASA C-MAPSS {DATASET}  |  device: {device}")
     print("=" * 58)
 
@@ -149,7 +153,7 @@ def train(n_estimators: int | None = None,
 
     spec = feature_spec()
     example = raw_input_example()
-    save_predictor(model, scaler, spec, example, PREDICTOR_DIR)
+    save_package("xgboost", model, scaler, spec, example, PREDICTOR_DIR)
     print(f"Packaged model saved → {PREDICTOR_DIR}")
 
     # ── Test Evaluation ───────────────────────────────────────────────────
@@ -210,7 +214,7 @@ def train(n_estimators: int | None = None,
             metrics=metrics, importance=importance, predictions=predictions,
             n_features=X_full.shape[1],
             n_val_engines=n_val_engines, register_model=register_model,
-            run_name=run_name,
+            run_name=run_name, rmse_gate=rmse_gate,
         )
     return metrics
 
@@ -224,7 +228,8 @@ def raw_input_example(n_engines: int = 2) -> pd.DataFrame:
 
 
 def _log_to_mlflow(model, scaler, spec, input_example, params, metrics, importance,
-                   predictions, n_features, n_val_engines, register_model, run_name) -> str:
+                   predictions, n_features, n_val_engines, register_model, run_name,
+                   rmse_gate) -> str:
     import mlflow
     from mlflow.entities import Metric
 
@@ -237,6 +242,7 @@ def _log_to_mlflow(model, scaler, spec, input_example, params, metrics, importan
         mlflow.set_tags({
             "dataset": f"C-MAPSS {DATASET}",
             "split_strategy": "engine (GroupShuffleSplit)",
+            "model_type": "xgboost",
             "git_sha": _git_sha(),
             "runner": "github-actions" if os.getenv("GITHUB_ACTIONS") else
                       "kaggle" if os.getenv("KAGGLE_KERNEL_RUN_TYPE") else "local",
@@ -267,12 +273,13 @@ def _log_to_mlflow(model, scaler, spec, input_example, params, metrics, importan
             shutil.copy(SCALER_PATH, os.path.join(tmp, "scaler.pkl"))
             mlflow.log_artifacts(tmp, artifact_path="evaluation")
 
-        log_predictor(
-            model, scaler, spec, input_example,
-            registered_model_name=MLFLOW_REGISTERED_MODEL if register_model else None,
-        )
+        log_package("xgboost", model, scaler, spec, input_example)
         print(f"\nMLflow run logged → {run.info.run_id}  ({MLFLOW_TRACKING_URI})")
-        return run.info.run_id
+
+    if register_model:
+        from registry import register_run
+        register_run(run.info.run_id, "xgboost", metrics, rmse_gate)
+    return run.info.run_id
 
 
 def load_model_and_scaler():
